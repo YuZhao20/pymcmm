@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Mixed-Copula Mixture Model (MCMM) with Gaussian Copula
+Mixed-Copula Mixture Model (MCMM) with Gaussian Copula (Revised)
 
 This library provides the core implementation of the MCMM model,
 capable of clustering datasets with mixed continuous, categorical,
-and ordinal data types.
+and ordinal data types. This version incorporates several improvements for
+robustness, numerical stability, and compatibility based on expert review.
 """
 
 import numpy as np

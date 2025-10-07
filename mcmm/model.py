@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Mixed-Copula Mixture Model (MCMM) with Gaussian Copula (Revised)
+Mixed-Copula Mixture Model (MCMM) with Gaussian Copula
 
 This library provides the core implementation of the MCMM model,
 capable of clustering datasets with mixed continuous, categorical,
-and ordinal data types. This version incorporates several improvements for
-robustness, numerical stability, and compatibility based on expert review.
+and ordinal data types.
 """
 
 import numpy as np
@@ -112,9 +111,9 @@ def _log_bivariate_gaussian_copula(u1, u2, rho):
     r2 = rho * rho
     
     log_det_term = -0.5 * np.log(1 - r2)
-    quad_term = (r2 * (z1**2 + z2**2) - 2 * rho * z1 * z2) / (2 * (1 - r2))
+    quad_term = (z1**2 + z2**2 - 2 * rho * z1 * z2) / (2 * (1 - r2))
     
-    return log_det_term - quad_term
+    return log_det_term - quad_term + 0.5 * (z1**2 + z2**2)
 
 # ---------- Ordinal Model Fitting ----------
 
@@ -300,8 +299,8 @@ class MCMMGaussianCopula:
         if self.cont_cols_:
             xs.append(StandardScaler().fit_transform(df_imputed[self.cont_cols_]))
         if self.cat_cols_ or self.ord_cols_:
-            # For compatibility with older scikit-learn versions
-            enc = OneHotEncoder(sparse=False, handle_unknown='ignore')
+            # FIX: Changed 'sparse' to 'sparse_output' for modern scikit-learn compatibility
+            enc = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
             xs.append(enc.fit_transform(df_imputed[self.cat_cols_ + self.ord_cols_]))
         
         if not xs: return np.ones((len(df), self.K)) / self.K
@@ -417,7 +416,7 @@ class MCMMGaussianCopula:
                         w_t = (self.fitted_nu_ + 1) / (self.fitted_nu_ + z**2)
                         weights *= w_t
                         if self.estimate_nu:
-                            all_z_t.append(z); all_w_t.append(weights)
+                           all_z_t.append(z); all_w_t.append(weights)
 
                     w_sum = weights.sum()
                     if w_sum < 1e-9: continue
@@ -474,7 +473,7 @@ class MCMMGaussianCopula:
             # Calculate U_k inside the loop to reduce peak memory
             U_k = np.full((len(df), d_all), np.nan)
             for i, rt in enumerate(row_tuples):
-                U_k[i, :], _ = self._build_u_vector(rt, k)
+                 U_k[i], _ = self._build_u_vector(rt, k)
 
             Z = norm.ppf(np.clip(U_k, 1e-10, 1 - 1e-10))
             R = self._pairwise_weighted_corr(Z, resp[:, k])
@@ -512,8 +511,8 @@ class MCMMGaussianCopula:
                 print(f"[EM] iter={it:03d}  loglik={ll:.3f}  nu={self.fitted_nu_:.2f}")
             
             if abs(ll - prev_ll) < self.tol * (1.0 + abs(prev_ll)):
-                prev_ll = ll # Update loglik before breaking
                 if self.verbose: print(f"Converged at iter {it}, loglik={ll:.3f}")
+                prev_ll = ll # Update loglik before breaking
                 break
             prev_ll = ll
 
@@ -527,9 +526,8 @@ class MCMMGaussianCopula:
         
         self.bic_ = -2 * self.loglik_ + n_params * np.log(len(df))
         
-        # cBIC is only relevant for composite likelihood
-        if self.copula_likelihood == 'pairwise':
-            self.cbic_ = self._calculate_cbic(df)
+        if self.copula_likelihood == 'pairwise' or isinstance(self, MCMMGaussianCopulaSpeedy):
+             self.cbic_ = self._calculate_cbic(df)
         return self
 
     def _calculate_cbic(self, df):
@@ -543,14 +541,20 @@ class MCMMGaussianCopula:
         return self.bic_
 
     def predict(self, df):
-        return self.predict_proba(df).argmax(axis=1)
+        if self.pi_ is None: raise RuntimeError("Model has not been fitted yet.")
+        df_pred = df[self.cont_cols_ + self.cat_cols_ + self.ord_cols_]
+        return self.predict_proba(df_pred).argmax(axis=1)
 
     def predict_proba(self, df):
-        log_resp, _, _ = self._get_log_probs_and_loglik(df)
+        if self.pi_ is None: raise RuntimeError("Model has not been fitted yet.")
+        df_pred = df[self.cont_cols_ + self.cat_cols_ + self.ord_cols_]
+        log_resp, _, _ = self._get_log_probs_and_loglik(df_pred)
         return np.exp(log_resp)
         
     def score_samples(self, df):
-        _, _, ll_per_sample = self._get_log_probs_and_loglik(df)
+        if self.pi_ is None: raise RuntimeError("Model has not been fitted yet.")
+        df_pred = df[self.cont_cols_ + self.cat_cols_ + self.ord_cols_]
+        _, _, ll_per_sample = self._get_log_probs_and_loglik(df_pred)
         return ll_per_sample
 
     def detect_outliers(self, df: pd.DataFrame, q: float = 1.0):
@@ -598,7 +602,7 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
             sub_tuples = [row_tuples[i] for i in idx]
             for i, rt in enumerate(sub_tuples):
                 U_sub[i, :], _ = self._build_u_vector(rt, k)
-                
+            
             Z = norm.ppf(np.clip(U_sub, 1e-10, 1 - 1e-10))
             
             # Using unweighted correlation on the importance sample is a valid approximation
@@ -665,3 +669,4 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
         log_resp = log_weighted_pk - ll_per_sample[:, None]
         total_loglik = np.sum(ll_per_sample)
         return log_resp, total_loglik, ll_per_sample
+

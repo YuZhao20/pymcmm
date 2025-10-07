@@ -275,9 +275,11 @@ class MCMMGaussianCopula:
         df_imputed = df.copy()
         for col in df_imputed.columns:
             if pd.api.types.is_numeric_dtype(df_imputed[col]):
-                df_imputed[col].fillna(df_imputed[col].mean(), inplace=True)
+                # FIX: Avoid FutureWarning by not using inplace=True on a chained assignment
+                df_imputed[col] = df_imputed[col].fillna(df_imputed[col].mean())
             else:
-                df_imputed[col].fillna(df_imputed[col].mode()[0], inplace=True)
+                # FIX: Avoid FutureWarning by not using inplace=True on a chained assignment
+                df_imputed[col] = df_imputed[col].fillna(df_imputed[col].mode()[0])
         
         xs = []
         if self.cont_cols_:
@@ -553,7 +555,9 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
                 idx = self.random_state.choice(n, size=m, replace=False, p=p)
 
             Z = norm.ppf(np.clip(U_all[idx, k, :], 1e-10, 1 - 1e-10))
-            R = self._pairwise_weighted_corr_safe(Z, np.ones(len(idx))) # Use safe version
+            
+            # This internal function should be defined within the parent class to be accessible
+            R = self._pairwise_weighted_corr_safe(Z, np.ones(len(idx)))
             R = _shrink_corr(R, self.shrink_lambda) if self.shrink_lambda > 0 else _nearest_pd(R)
             
             diag = np.sqrt(np.diag(R))
@@ -567,7 +571,7 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
                 self.speedy_edges_[k] = _max_spanning_tree_from_corr(Rabs)
             else: # knn
                 self.speedy_edges_[k] = _knn_graph_edges(Rabs, k_per_node=self.speedy_k_per_node)
-    
+
     def _M_step(self, df, resp):
         """Combined M-step for Speedy mode."""
         self._M_step_marginals(df, resp)

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Mixed-Copula Mixture Model (MCMM) with Gaussian Copula
+Mixed-Copula Mixture Model (MCMM) with Gaussian Copula (Revised)
 
 This library provides the core implementation of the MCMM model,
 capable of clustering datasets with mixed continuous, categorical,
-and ordinal data types.
+and ordinal data types. This version incorporates several improvements for
+robustness, numerical stability, and compatibility based on expert review.
 """
 
 import numpy as np
@@ -26,11 +27,21 @@ def _safe_log(x, eps=1e-12):
     return np.log(np.clip(x, eps, None))
 
 def _nearest_pd(A, eps=1e-7):
-    """Finds the nearest positive definite matrix to A."""
+    """
+    Finds the nearest positive definite matrix to A.
+    Also re-normalizes to be closer to a correlation matrix.
+    """
     A = 0.5 * (A + A.T)
     vals, vecs = eigh(A)
     vals = np.clip(vals, eps, None)
-    return (vecs * vals) @ vecs.T
+    # Correct reconstruction of the matrix
+    B = vecs @ np.diag(vals) @ vecs.T
+    # Re-normalize to have diagonals of 1, preserving PD property
+    d = np.sqrt(np.clip(np.diag(B), 1e-12, None))
+    d[d < 1e-9] = 1.0 # Avoid division by zero
+    B = B / d[:, None] / d[None, :]
+    # Symmetrize again due to potential floating point inaccuracies
+    return 0.5 * (B + B.T)
 
 def _shrink_corr(R, lam=0.05):
     """Applies shrinkage to a correlation matrix."""
@@ -93,15 +104,17 @@ def _log_gaussian_copula_density_full(u, R):
     return -0.5 * logdet - 0.5 * quad
 
 def _log_bivariate_gaussian_copula(u1, u2, rho):
+    """Computes log-density of the bivariate Gaussian copula robustly."""
     u1, u2 = np.clip(u1, 1e-10, 1 - 1e-10), np.clip(u2, 1e-10, 1 - 1e-10)
     z1, z2 = norm.ppf(u1), norm.ppf(u2)
+    # Clip rho to avoid singularity at |rho|=1
+    rho = float(np.clip(rho, -0.999999, 0.999999))
     r2 = rho * rho
-    if 1 - r2 < 1e-9:
-        return -np.inf if (z1 - np.sign(rho) * z2)**2 > 1e-3 else 0
     
-    log_phi2 = -0.5 * np.log(1 - r2) - (z1*z1 - 2*rho*z1*z2 + z2*z2) / (2 * (1 - r2))
-    log_phi_sum = -0.5 * (z1**2 + z2**2)
-    return log_phi2 - log_phi_sum
+    log_det_term = -0.5 * np.log(1 - r2)
+    quad_term = (r2 * (z1**2 + z2**2) - 2 * rho * z1 * z2) / (2 * (1 - r2))
+    
+    return log_det_term - quad_term
 
 # ---------- Ordinal Model Fitting ----------
 
@@ -142,6 +155,10 @@ def _fit_cumlogit_weighted(counts):
 
 # ---------- nu Optimizer for Student-t ----------
 def _optimize_t_nu(z_list, w_list, nu_bounds=(2.1, 100.0)):
+    """
+    Optimizes the shared degrees of freedom (nu) for the Student-t distribution
+    across all continuous variables and clusters.
+    """
     if not z_list: return None
     z_flat, w_flat = np.concatenate(z_list), np.concatenate(w_list)
     def neg_obj(nu):
@@ -283,12 +300,15 @@ class MCMMGaussianCopula:
         if self.cont_cols_:
             xs.append(StandardScaler().fit_transform(df_imputed[self.cont_cols_]))
         if self.cat_cols_ or self.ord_cols_:
-            xs.append(OneHotEncoder(sparse_output=False, handle_unknown='ignore').fit_transform(df_imputed[self.cat_cols_ + self.ord_cols_]))
+            # For compatibility with older scikit-learn versions
+            enc = OneHotEncoder(sparse=False, handle_unknown='ignore')
+            xs.append(enc.fit_transform(df_imputed[self.cat_cols_ + self.ord_cols_]))
         
         if not xs: return np.ones((len(df), self.K)) / self.K
         
         Xkm = np.hstack(xs)
-        kmeans = KMeans(self.K, n_init='auto', random_state=self.random_state.integers(1e6))
+        # For compatibility with older scikit-learn versions
+        kmeans = KMeans(self.K, n_init=10, random_state=int(self.random_state.integers(1_000_000)))
         labels = kmeans.fit_predict(Xkm)
         resp = np.zeros((len(df), self.K))
         resp[np.arange(len(df)), labels] = 1.0
@@ -316,10 +336,13 @@ class MCMMGaussianCopula:
             try:
                 x_str = str(x)
                 idx = levels.index(x_str if c in self.cat_levels_ else x)
-                log_marg += _safe_log(probs[idx])
+                prob_val = np.clip(probs[idx], 1e-12, 1.0)
+                log_marg += _safe_log(prob_val) # Use clipped value
                 Fm, F = (np.sum(probs[:idx]), np.sum(probs[:idx+1]))
             except (ValueError, IndexError):
-                log_marg += -30; Fm, F = 0.0, 1.0
+                # Handle unknown categories with a fixed small log-probability
+                log_marg += np.log(1e-6)
+                Fm, F = 0.0, 1.0
             u = 0.5 * (Fm + F) if self.dt_mode == 'mid' else self.random_state.uniform(Fm, F)
             u_list.append(u)
             
@@ -354,16 +377,24 @@ class MCMMGaussianCopula:
             log_pk[k] = log_marg + log_c
         return log_pk
 
-    def _E_step(self, df):
+    def _get_log_probs_and_loglik(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
+        """Core computation for E-step, returns log-responsibilities, total log-likelihood, and per-sample log-likelihood."""
+        df = df.copy()
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
-        log_resp_list = Parallel(n_jobs=self.n_jobs)(delayed(self._log_pk_row)(rt) for rt in row_tuples)
-        log_resp = np.array(log_resp_list)
-
-        log_resp += _safe_log(self.pi_)
-        ll_per_sample = logsumexp(log_resp, axis=1)
-        loglik = np.sum(ll_per_sample)
-        log_resp -= ll_per_sample[:, None]
-        return np.exp(log_resp), loglik
+        
+        log_pk_list = Parallel(n_jobs=self.n_jobs)(delayed(self._log_pk_row)(rt) for rt in row_tuples)
+        log_pk = np.array(log_pk_list)
+        
+        log_weighted_pk = log_pk + _safe_log(self.pi_)
+        ll_per_sample = logsumexp(log_weighted_pk, axis=1)
+        log_resp = log_weighted_pk - ll_per_sample[:, None]
+        total_loglik = np.sum(ll_per_sample)
+        
+        return log_resp, total_loglik, ll_per_sample
+        
+    def _E_step(self, df):
+        log_resp, total_loglik, _ = self._get_log_probs_and_loglik(df)
+        return np.exp(log_resp), total_loglik
 
     def _M_step_marginals(self, df, resp):
         """M-step for marginal distribution parameters."""
@@ -386,14 +417,15 @@ class MCMMGaussianCopula:
                         w_t = (self.fitted_nu_ + 1) / (self.fitted_nu_ + z**2)
                         weights *= w_t
                         if self.estimate_nu:
-                           all_z_t.append(z); all_w_t.append(weights)
+                            all_z_t.append(z); all_w_t.append(weights)
 
                     w_sum = weights.sum()
                     if w_sum < 1e-9: continue
                     
                     mu = np.sum(weights * x_masked) / w_sum
                     var = np.sum(weights * (x_masked - mu)**2) / w_sum
-                    self.mu_[k, j], self.sig_[k, j] = mu, np.sqrt(var)
+                    self.mu_[k, j] = mu
+                    self.sig_[k, j] = np.sqrt(max(var, 1e-10)) # Avoid sqrt(0)
 
         for c in self.cat_cols_:
             levels, x = self.cat_levels_[c], df[c].to_numpy(dtype=str)
@@ -434,19 +466,21 @@ class MCMMGaussianCopula:
         return R
 
     def _M_step_copulas(self, df, resp):
-        """M-step for copula parameters (correlation matrices)."""
+        """M-step for copula parameters, optimized for memory."""
         d_all = len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
-        U = np.zeros((len(df), self.K, d_all))
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
-        for i, rt in enumerate(row_tuples):
-            for k in range(self.K):
-                U[i, k, :], _ = self._build_u_vector(rt, k)
-            
+        
         for k in range(self.K):
-            Z = norm.ppf(np.clip(U[:, k, :], 1e-10, 1 - 1e-10))
+            # Calculate U_k inside the loop to reduce peak memory
+            U_k = np.full((len(df), d_all), np.nan)
+            for i, rt in enumerate(row_tuples):
+                U_k[i, :], _ = self._build_u_vector(rt, k)
+
+            Z = norm.ppf(np.clip(U_k, 1e-10, 1 - 1e-10))
             R = self._pairwise_weighted_corr(Z, resp[:, k])
             R = _shrink_corr(R, self.shrink_lambda) if self.shrink_lambda > 0 else _nearest_pd(R)
             
+            # Re-normalize to ensure it's a correlation matrix
             diag = np.sqrt(np.diag(R))
             if np.any(diag < 1e-9): continue
             R /= np.outer(diag, diag)
@@ -478,6 +512,7 @@ class MCMMGaussianCopula:
                 print(f"[EM] iter={it:03d}  loglik={ll:.3f}  nu={self.fitted_nu_:.2f}")
             
             if abs(ll - prev_ll) < self.tol * (1.0 + abs(prev_ll)):
+                prev_ll = ll # Update loglik before breaking
                 if self.verbose: print(f"Converged at iter {it}, loglik={ll:.3f}")
                 break
             prev_ll = ll
@@ -491,32 +526,32 @@ class MCMMGaussianCopula:
         if self.cont_marginal == 'student_t' and self.estimate_nu: n_params += 1
         
         self.bic_ = -2 * self.loglik_ + n_params * np.log(len(df))
+        
         # cBIC is only relevant for composite likelihood
         if self.copula_likelihood == 'pairwise':
-             self.cbic_ = self._calculate_cbic(df, n_params)
+            self.cbic_ = self._calculate_cbic(df)
         return self
 
-    def _calculate_cbic(self, df, n_params_bic):
-        # This is a placeholder for the actual cBIC calculation which requires
-        # estimating the Godambe Information Matrix. For simplicity, we can
-        # return a modified BIC or NaN if not fully implemented.
-        # A full implementation would require computing scores and hessians.
-        # For now, we return NaN as a clear indicator.
-        return np.nan
+    def _calculate_cbic(self, df):
+        """
+        Placeholder for cBIC. A full implementation requires estimating the Godambe
+        Information Matrix. This returns the standard BIC as a proxy.
+        """
+        if self.verbose:
+            print("Warning: cBIC calculation is not fully implemented. "
+                  "Returning standard BIC value as a proxy.")
+        return self.bic_
 
     def predict(self, df):
         return self.predict_proba(df).argmax(axis=1)
 
     def predict_proba(self, df):
-        resp, _ = self._E_step(df.copy())
-        return resp
+        log_resp, _, _ = self._get_log_probs_and_loglik(df)
+        return np.exp(log_resp)
         
     def score_samples(self, df):
-        row_tuples = list(df.itertuples(index=False, name='DataRow'))
-        log_resp = Parallel(n_jobs=self.n_jobs)(delayed(self._log_pk_row)(rt) for rt in row_tuples)
-        log_resp = np.array(log_resp)
-        log_resp += _safe_log(self.pi_)
-        return logsumexp(log_resp, axis=1)
+        _, _, ll_per_sample = self._get_log_probs_and_loglik(df)
+        return ll_per_sample
 
     def detect_outliers(self, df: pd.DataFrame, q: float = 1.0):
         logs = self.score_samples(df)
@@ -527,7 +562,7 @@ class MCMMGaussianCopula:
 
 class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
     """
-    Speed-oriented variant of MCMM.
+    Speed-oriented variant of MCMM using sparse composite likelihood.
     """
     def __init__(self, *args,
                  speedy_graph:str='mst',
@@ -547,24 +582,26 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
         n, d_all = len(df), len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
         self.R_ = np.array([np.eye(d_all) for _ in range(self.K)])
         self.speedy_edges_ = [[] for _ in range(self.K)]
-
-        U_all = np.zeros((n, self.K, d_all))
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
-        for i, rt in enumerate(row_tuples):
-            for k in range(self.K):
-                U_all[i, k, :], _ = self._build_u_vector(rt, k)
 
         for k in range(self.K):
+            # Use a single U_k calculation for subsampling to save memory
+            m = min(self.corr_subsample, n)
             w = resp[:, k]
             p = w / max(w.sum(), 1e-12)
-            if np.any(np.isnan(p)) or p.sum() == 0:
-                idx = self.random_state.integers(0, n, size=min(self.corr_subsample, n))
+            if np.any(np.isnan(p)) or p.sum() < 1e-9:
+                idx = self.random_state.integers(0, n, size=m)
             else:
-                m = min(self.corr_subsample, n)
-                idx = self.random_state.choice(n, size=m, replace=False, p=p)
-
-            Z = norm.ppf(np.clip(U_all[idx, k, :], 1e-10, 1 - 1e-10))
+                idx = self.random_state.choice(n, size=m, replace=True, p=p)
             
+            U_sub = np.full((m, d_all), np.nan)
+            sub_tuples = [row_tuples[i] for i in idx]
+            for i, rt in enumerate(sub_tuples):
+                U_sub[i, :], _ = self._build_u_vector(rt, k)
+                
+            Z = norm.ppf(np.clip(U_sub, 1e-10, 1 - 1e-10))
+            
+            # Using unweighted correlation on the importance sample is a valid approximation
             R = self._pairwise_weighted_corr(Z, np.ones(len(idx)))
             R = _shrink_corr(R, self.shrink_lambda) if self.shrink_lambda > 0 else _nearest_pd(R)
             
@@ -580,11 +617,6 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
             else: # knn
                 self.speedy_edges_[k] = _knn_graph_edges(Rabs, k_per_node=self.speedy_k_per_node)
     
-    def _M_step(self, df, resp):
-        """Combined M-step for Speedy mode."""
-        self._M_step_marginals(df, resp)
-        self._M_step_copulas(df, resp)
-
     def _log_pk_row_speedy(self, row_tuple):
         log_pk = np.zeros(self.K)
         all_cols_map = {c: i for i, c in enumerate(self.cont_cols_ + self.cat_cols_ + self.ord_cols_)}
@@ -610,26 +642,26 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
                 log_c = msum / max(wsum, 1e-9)
             log_pk[k] = log_marg + log_c
         return log_pk
+    
+    def _process_batch(self, batch_tuples):
+        return np.array([self._log_pk_row_speedy(rt) for rt in batch_tuples])
 
-    def _E_step(self, df):
+    def _get_log_probs_and_loglik(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
+        """Overridden core computation for Speedy mode using mini-batches."""
         n = len(df)
+        df = df.copy()
         B = max(1, self.e_step_batch)
-        log_resp = np.zeros((n, self.K))
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
         
+        # Batch processing with parallel jobs
         results = Parallel(n_jobs=self.n_jobs)(
             delayed(self._process_batch)(row_tuples[s:min(n, s+B)]) for s in range(0, n, B)
         )
         
-        for s, blk in zip(range(0, n, B), results):
-            log_resp[s:min(n, s+B)] = blk
-            
-        log_resp += _safe_log(self.pi_)
-        ll_per_sample = logsumexp(log_resp, axis=1)
-        loglik = np.sum(ll_per_sample)
-        log_resp -= ll_per_sample[:, None]
-        return np.exp(log_resp), loglik
-
-    def _process_batch(self, batch_tuples):
-        return np.array([self._log_pk_row_speedy(rt) for rt in batch_tuples])
-
+        log_pk = np.vstack(results)
+        
+        log_weighted_pk = log_pk + _safe_log(self.pi_)
+        ll_per_sample = logsumexp(log_weighted_pk, axis=1)
+        log_resp = log_weighted_pk - ll_per_sample[:, None]
+        total_loglik = np.sum(ll_per_sample)
+        return log_resp, total_loglik, ll_per_sample

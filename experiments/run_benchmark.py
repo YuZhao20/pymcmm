@@ -6,6 +6,7 @@ various synthetic data scenarios.
 import time
 import pandas as pd
 import warnings
+import numpy as np
 from typing import List, Dict
 
 # To run this script, ensure you are in the root directory of the project (pymcmm/)

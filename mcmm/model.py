@@ -226,7 +226,7 @@ class MCMMGaussianCopula:
         self.cat_levels_, self.ord_levels_ = {}, {}
         self.mu_, self.sig_, self.R_, self.pi_ = None, None, None, None
         self.cat_probs_, self.ord_probs_, self.ord_thetas_ = {}, {}, {}
-        self.bic_, self.loglik_, self.history_, self.fitted_nu_ = None, None, [], self.t_nu
+        self.bic_, self.cbic_, self.loglik_, self.history_, self.fitted_nu_ = None, None, None, [], self.t_nu
 
     def _infer_columns(self, df, cont_cols, cat_cols, ord_cols):
         if cont_cols is None:
@@ -491,7 +491,18 @@ class MCMMGaussianCopula:
         if self.cont_marginal == 'student_t' and self.estimate_nu: n_params += 1
         
         self.bic_ = -2 * self.loglik_ + n_params * np.log(len(df))
+        # cBIC is only relevant for composite likelihood
+        if self.copula_likelihood == 'pairwise':
+             self.cbic_ = self._calculate_cbic(df, n_params)
         return self
+
+    def _calculate_cbic(self, df, n_params_bic):
+        # This is a placeholder for the actual cBIC calculation which requires
+        # estimating the Godambe Information Matrix. For simplicity, we can
+        # return a modified BIC or NaN if not fully implemented.
+        # A full implementation would require computing scores and hessians.
+        # For now, we return NaN as a clear indicator.
+        return np.nan
 
     def predict(self, df):
         return self.predict_proba(df).argmax(axis=1)

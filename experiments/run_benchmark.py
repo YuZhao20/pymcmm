@@ -1,108 +1,166 @@
-# =========================================================================
-# MCMM Benchmark Suite
-#
-# This script contains the functions to generate synthetic datasets for various
-# scenarios and to run the benchmark comparing MCMM against baseline models
-# like KMeans and K-Prototypes.
-#
-# To Run:
-#  - Ensure `mcmm` package is installed or in the parent directory.
-#  - Ensure `utils.py` is in the same directory.
-#  - Run this script directly: `python run_benchmark.py`
-# =========================================================================
-
-import numpy as np
-import pandas as pd
+# -*- coding: utf-8 -*-
+"""
+Benchmark suite for MCMM, comparing it against baseline models across
+various synthetic data scenarios.
+"""
 import time
-from typing import List, Dict, Tuple, Optional
-from pandas.api.types import CategoricalDtype
+import pandas as pd
+import warnings
+from typing import List, Dict
 
-# Add parent directory to path to find the 'mcmm' package
-import sys
-sys.path.append('..')
+# To run this script, ensure you are in the root directory of the project (pymcmm/)
+# and execute: python experiments/run_benchmark.py
 from mcmm.model import MCMMGaussianCopula, MCMMGaussianCopulaSpeedy
-from utils import (
+from experiments.utils import (
     _impute_dataframe, _evaluate, _prep_kmeans_space, safe_silhouette,
-    plot_bar_performance, plot_time_tradeoff, plot_heatmap, plot_scalability
+    run_kmeans, run_kprototypes,
+    plot_bar_performance, plot_time_tradeoff, plot_heatmap, plot_scalability,
+    make_scenario_basic, make_scenario_imbalanced, make_scenario_weaksep,
+    make_scenario_heavytail, make_scenario_highdim, make_scenario_mnar,
+    make_scenario_blockcorr, make_scenario_discrete, make_scenario_noise
 )
 
-# Optional: K-Prototypes
-try:
-    from kmodes.kprototypes import KPrototypes
-    HAS_KPROTO = True
-except ImportError:
-    HAS_KPROTO = False
-    print("Warning: 'kmodes' package not found. K-Prototypes baseline will be skipped.")
-    print("         Install with: pip install kmodes")
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore', category=FutureWarning)
 
+# --- Scenario Registry ---
+SCENARIOS = [
+    ("basic", make_scenario_basic),
+    ("imbalanced", make_scenario_imbalanced),
+    ("weak_separation", make_scenario_weaksep),
+    ("heavy_tail", make_scenario_heavytail),
+    ("high_dim", make_scenario_highdim),
+    ("mnar_like", make_scenario_mnar),
+    ("block_corr", make_scenario_blockcorr),
+    ("mostly_discrete", make_scenario_discrete),
+    ("with_noise", make_scenario_noise),
+]
 
-# =========================================================================
-# ====== Data Generation: Synthetic Scenarios =============================
-# =========================================================================
-# (Ported from the original script)
-
-def _apply_missing(df: pd.DataFrame, rng: np.random.Generator, p=0.03) -> pd.DataFrame:
-    """Applies missing values to a dataframe at random."""
-    mask = rng.random(df.shape) < p
-    df_missing = df.mask(mask)
-    return df_missing
-
-def make_scenario_basic(n=1200, seed=0) -> Tuple[pd.DataFrame, np.ndarray, Dict]:
-    """Basic, well-separated scenario."""
-    rng = np.random.default_rng(seed)
-    K = 3
-    z = rng.integers(0, K, size=n)
-    mus = np.array([[0,0],[3,-3],[-3,3]], float)
-    cov = np.array([[1.0, 0.6],[0.6, 1.0]])
-    Xc = np.zeros((n,2))
-    for k in range(K):
-        idx = (z==k)
-        if idx.sum() > 0:
-            Xc[idx] = rng.multivariate_normal(mus[k], cov, size=idx.sum())
+# --- MCMM Execution Helper ---
+def run_mcmm(df: pd.DataFrame, spec: Dict[str, List[str]], k: int,
+             mode='pairwise', student_t=True, estimate_nu=True,
+             max_iter=200, tol=1e-4, verbose=0, **speedy_kwargs):
     
-    cat_levels = ['A','B','C']
-    pks = np.array([[0.7,0.2,0.1],[0.2,0.6,0.2],[0.1,0.2,0.7]])
-    Xn = np.array([rng.choice(cat_levels, p=pks[k]) for k in z])
+    ModelClass = MCMMGaussianCopulaSpeedy if mode == 'speedy' else MCMMGaussianCopula
     
-    ord_levels = [1,2,3,4]
-    qks = np.array([[0.6,0.25,0.1,0.05],[0.2,0.3,0.3,0.2],[0.05,0.15,0.3,0.5]])
-    Xo = np.array([rng.choice(ord_levels, p=qks[k]) for k in z])
-    
-    df = pd.DataFrame({'x1':Xc[:,0], 'x2':Xc[:,1], 'cat':Xn, 'ord':Xo})
-    df['ord'] = df['ord'].astype(CategoricalDtype(categories=ord_levels, ordered=True))
-    df = _apply_missing(df, rng, p=0.03)
-    
-    spec = {'cont': ['x1','x2'], 'cat': ['cat'], 'ord': ['ord']}
-    return df, z, spec
+    model_params = {
+        'n_components': k,
+        'cont_marginal': 'student_t' if student_t else 'gaussian',
+        't_nu': 5.0,
+        'estimate_nu': estimate_nu,
+        'ord_marginal': 'cumlogit',
+        'copula_likelihood': 'pairwise' if mode in ('pairwise', 'speedy') else 'full',
+        'pairwise_weight': 'abs_rho',
+        'dt_mode': 'random',
+        'shrink_lambda': 0.05,
+        'max_iter': max_iter,
+        'tol': tol,
+        'random_state': 42,
+        'verbose': verbose
+    }
 
-# ...(Assume all other 8 make_scenario_* functions are here)...
-SCENARIOS = [("basic", make_scenario_basic)] # Placeholder for all 9 scenarios
+    if mode == 'speedy':
+        model_params.update(speedy_kwargs)
 
-# =========================================================================
-# ====== Model Runners ====================================================
-# =========================================================================
+    model = ModelClass(**model_params)
+    
+    t0 = time.time()
+    model.fit(df, cont_cols=spec['cont'], cat_cols=spec['cat'], ord_cols=spec['ord'])
+    t1 = time.time()
+    
+    return {
+        'labels': model.predict(df),
+        'bic': model.bic_,
+        'cbic': getattr(model, 'cbic_', np.nan),
+        'loglik': model.loglik_,
+        'nu': getattr(model, 'fitted_nu_', None),
+        'runtime': t1 - t0,
+        'model_obj': model
+    }
 
-def run_all_benchmarks():
-    """Main function to execute all benchmarks and generate plots."""
-    # This would orchestrate the calls to run_benchmark_with_k_selection etc.
-    # For now, it's a placeholder.
-    print("Running benchmarks...")
-    df, z_true, spec = make_scenario_basic()
+# --- K-Selection Wrappers ---
+def select_k_mcmm_bic(df: pd.DataFrame, spec: Dict[str, List[str]],
+                      k_grid: List[int], mode='pairwise', **kwargs):
+    records = []
+    best_res, best_bic = None, np.inf
     
-    print("\n--- Testing MCMM Full ---")
-    model_full = MCMMGaussianCopula(n_components=3, copula_likelihood='full', verbose=1)
-    model_full.fit(df, **spec)
-    labels = model_full.predict(df)
-    ari, nmi = _evaluate(z_true, labels)
-    print(f"ARI: {ari:.4f}, NMI: {nmi:.4f}")
+    for k in k_grid:
+        res = run_mcmm(df, spec, k, mode=mode, **kwargs)
+        bic = res['cbic'] if mode != 'full' and not pd.isna(res['cbic']) else res['bic']
+        records.append({'k': k, 'bic': bic, 'loglik': res['loglik'], 'time': res['runtime']})
+        if bic < best_bic:
+            best_bic = bic
+            best_res = {'k': k, **res}
+            
+    return best_res, pd.DataFrame(records)
+
+def select_k_kmeans(df: pd.DataFrame, k_grid: List[int]):
+    df_imp = _impute_dataframe(df)
+    X = _prep_kmeans_space(df_imp)
+    stats = {}
+    for k in k_grid:
+        labels, sil, inertia, t = run_kmeans(df, k)
+        stats[k] = {'labels': labels, 'silhouette': sil, 'inertia': inertia, 'time': t}
     
-    print("\n--- Testing MCMM Speedy ---")
-    # model_speedy = MCMMGaussianCopulaSpeedy(n_components=3, verbose=1)
-    # model_speedy.fit(df, **spec)
-    # labels_speedy = model_speedy.predict(df)
-    # ari_s, nmi_s = _evaluate(z_true, labels_speedy)
-    # print(f"ARI: {ari_s:.4f}, NMI: {nmi_s:.4f}")
+    sils = {k: v['silhouette'] for k, v in stats.items() if not pd.isna(v['silhouette'])}
+    if sils:
+        k_star = max(sils, key=sils.get)
+    else:
+        k_star = k_grid[0] # Fallback
+    return k_star, stats
+
+def select_k_kprototypes(df: pd.DataFrame, k_grid: List[int]):
+    stats = {}
+    for k in k_grid:
+        labels, cost, sil, t = run_kprototypes(df, k)
+        stats[k] = {'labels': labels, 'cost': cost, 'silhouette': sil, 'time': t}
+
+    costs = {k: v['cost'] for k, v in stats.items() if not pd.isna(v['cost'])}
+    if costs:
+        k_star = min(costs, key=costs.get)
+    else:
+        k_star = k_grid[0] # Fallback
+    return k_star, stats
+
+# --- Main Benchmark Runner ---
+def run_benchmark(scenarios=SCENARIOS, mcmm_modes=('pairwise', 'full', 'speedy'), k_grid=(2, 3, 4, 5)):
+    results = []
+    for name, maker in scenarios:
+        print(f"\n=== Scenario: {name} ===")
+        df, z_true, spec = maker()
+
+        # --- MCMM Models ---
+        for mode in mcmm_modes:
+            best, _ = select_k_mcmm_bic(df, spec, list(k_grid), mode=mode, verbose=0)
+            ari, nmi = _evaluate(z_true, best['labels'])
+            print(f"MCMM[{mode}] k*={best['k']} | ARI={ari:.4f} NMI={nmi:.4f} | BIC={best['bic']:.1f} | time={best['runtime']:.2f}s")
+            results.append({'scenario': name, 'model': f'MCMM_{mode}', 'k_chosen': best['k'], 'ARI': ari, 'NMI': nmi, 'time': best['runtime']})
+
+        # --- Baseline: KMeans ---
+        k_star, stats = select_k_kmeans(df, list(k_grid))
+        ari, nmi = _evaluate(z_true, stats[k_star]['labels'])
+        print(f"KMeans k*={k_star} | ARI={ari:.4f} NMI={nmi:.4f} | silhouette={stats[k_star]['silhouette']:.3f} | time={stats[k_star]['time']:.2f}s")
+        results.append({'scenario': name, 'model': 'KMeans', 'k_chosen': k_star, 'ARI': ari, 'NMI': nmi, 'time': stats[k_star]['time']})
+
+        # --- Baseline: K-Prototypes ---
+        try:
+            k_star, stats = select_k_kprototypes(df, list(k_grid))
+            ari, nmi = _evaluate(z_true, stats[k_star]['labels'])
+            print(f"K-Prototypes k*={k_star} | ARI={ari:.4f} NMI={nmi:.4f} | cost={stats[k_star]['cost']:.1f} | time={stats[k_star]['time']:.2f}s")
+            results.append({'scenario': name, 'model': 'KPrototypes', 'k_chosen': k_star, 'ARI': ari, 'NMI': nmi, 'time': stats[k_star]['time']})
+        except ImportError:
+            print("K-Prototypes: Skipped (kmodes library not installed)")
+
+    results_df = pd.DataFrame(results)
+    print("\n\n=== Benchmark Summary (Mean over Scenarios) ===")
+    print(results_df.groupby('model')[['ARI', 'NMI', 'time']].mean().sort_values('ARI', ascending=False))
+    return results_df
 
 if __name__ == '__main__':
-    run_all_benchmarks()
+    results_df = run_benchmark()
+    
+    print("\n\n--- Generating Plots ---")
+    plot_bar_performance(results_df, metric='ARI')
+    plot_heatmap(results_df, metric='ARI')
+    plot_time_tradeoff(results_df, metric='ARI')
 

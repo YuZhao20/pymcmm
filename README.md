@@ -1,7 +1,14 @@
-Mixed-Copula Mixture Model (MCMM)このリポジトリは、論文で提案された混合コピュラ混合モデル（MCMM）のPython実装を提供します。このモデルは、連続、カテゴリ、順序変数が混在するデータセットに対する、柔軟なクラスタリング手法です。主な特徴混合データ型への対応: 連続、カテゴリ、順序変数を統一的なフレームワークで扱います。柔軟な周辺分布: 連続変数には正規分布または外れ値に頑健なスチューデントのt分布を、離散変数にはカテゴリカル分布や累積ロジットモデルを適用します。依存構造のモデル化: ガウシアン・コピュラを用いて、変数間の複雑な依存関係を捉えます。欠損値への頑健性: MAR（Missing At Random）仮定の下で、欠損値を自然に扱うことができます。高速化オプション: 高次元・大規模データに対応するため、計算効率を重視したpairwise（合成尤度）モードや、さらに最適化されたspeedyモードを提供します。並列処理: 計算負荷の高いEステップを並列化し、マルチコアCPUの性能を活かした高速化が可能です。セットアップ1. リポジトリのクローンまず、このリポジトリをローカルマシンにクローンします。git clone [https://github.com/YOUR_USERNAME/pymcmm.git](https://github.com/YOUR_USERNAME/pymcmm.git)
+Mixed-Copula Mixture Model (MCMM)このリポジトリは、論文で提案された混合コピュラ混合モデル（MCMM）のPython実装を提供します。このモデルは、連続、カテゴリ、順序変数が混在するデータセットに対する、柔軟なクラスタリング手法です。主な特徴混合データ型への対応: 連続、カテゴリ、順序変数を統一的なフレームワークで扱います。柔軟な周辺分布: 連続変数には正規分布または外れ値に頑健なスチューデントのt分布を、離散変数にはカテゴリカル分布や累積ロジットモデルを適用します。依存構造のモデル化: ガウシアン・コピュラを用いて、変数間の複雑な依存関係を捉えます。欠損値への頑健性: MAR（Missing At Random）仮定の下で、欠損値を自然に扱うことができます。高速化オプション: 高次元・大規模データに対応するため、計算効率を重視したpairwise（合成尤度）モードや、さらに最適化されたspeedyモードを提供します。並列処理: 計算負荷の高いEステップを並列化し、マルチコアCPUの性能を活かした高速化が可能です。インストールこのパッケージを利用するには、まずリポジトリをクローンし、pip を使ってインストールします。# 1. リポジトリをクローン
+git clone [https://github.com/YOUR_USERNAME/pymcmm.git](https://github.com/YOUR_USERNAME/pymcmm.git)
 cd pymcmm
-2. 依存関係のインストールモデルの実行には、以下のライブラリが必要です。requirements.txtファイルを用いて一括でインストールすることを推奨します。pip install numpy pandas scikit-learn scipy joblib
-（ベンチマークを実行する場合は、kmodesやmatplotlib, seabornも追加でインストールしてください。）基本的な使い方mcmmパッケージをインポートし、モデルを初期化してfitメソッドを呼び出すだけで、簡単にクラスタリングを実行できます。import pandas as pd
+
+# 2. パッケージをインストール
+# これにより、mcmmライブラリがあなたのPython環境にインストールされ、
+# どのディレクトリからでもインポートできるようになります。
+pip install .
+開発者向けもし実験コードの実行やライブラリ自体の改修を行う場合は、requirements.txtを使って編集可能モード (-e) でインストールすることをお勧めします。# 編集可能モードでインストールし、実験に必要な追加ライブラリも導入
+pip install -r requirements.txt
+基本的な使い方mcmmパッケージをインストールすると、どのPythonスクリプトからでもライブラリをインポートして使用できます。import pandas as pd
 from mcmm.model import MCMMGaussianCopula
 
 # 1. データの準備
@@ -54,4 +61,6 @@ probabilities = mcmm.predict_proba(df)
 ├── experiments/           # 論文の実験を再現するためのスクリプト
 │   ├── run_benchmark.py
 │   └── utils.py
+├── setup.py               # パッケージインストール用の設定ファイル
+├── requirements.txt       # 開発環境用の依存関係ファイル
 └── README.md              # このファイル

@@ -275,10 +275,8 @@ class MCMMGaussianCopula:
         df_imputed = df.copy()
         for col in df_imputed.columns:
             if pd.api.types.is_numeric_dtype(df_imputed[col]):
-                # FIX: Avoid FutureWarning by not using inplace=True on a chained assignment
                 df_imputed[col] = df_imputed[col].fillna(df_imputed[col].mean())
             else:
-                # FIX: Avoid FutureWarning by not using inplace=True on a chained assignment
                 df_imputed[col] = df_imputed[col].fillna(df_imputed[col].mode()[0])
         
         xs = []
@@ -418,6 +416,23 @@ class MCMMGaussianCopula:
         if self.cont_marginal == 'student_t' and self.estimate_nu and all_z_t:
             self.fitted_nu_ = _optimize_t_nu(all_z_t, all_w_t) or self.fitted_nu_
 
+    def _pairwise_weighted_corr(self, Z, W):
+        _, d = Z.shape
+        R = np.eye(d)
+        for i in range(d):
+            for j in range(i+1, d):
+                mask = ~np.isnan(Z[:, i]) & ~np.isnan(Z[:, j])
+                if not np.any(mask): R[i,j]=R[j,i]=0.0; continue
+                w_sub, z_i, z_j = W[mask], Z[mask, i], Z[mask, j]
+                w_sum = w_sub.sum()
+                if w_sum < 1e-9: R[i,j]=R[j,i]=0.0; continue
+                mu_i, mu_j = np.sum(w_sub*z_i)/w_sum, np.sum(w_sub*z_j)/w_sum
+                cov = np.sum(w_sub*(z_i-mu_i)*(z_j-mu_j))/w_sum
+                var_i, var_j = np.sum(w_sub*(z_i-mu_i)**2)/w_sum, np.sum(w_sub*(z_j-mu_j)**2)/w_sum
+                rho = cov/np.sqrt(var_i*var_j) if var_i>1e-9 and var_j>1e-9 else 0.0
+                R[i,j] = R[j,i] = np.clip(rho, -0.999, 0.999)
+        return R
+
     def _M_step_copulas(self, df, resp):
         """M-step for copula parameters (correlation matrices)."""
         d_all = len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
@@ -426,27 +441,10 @@ class MCMMGaussianCopula:
         for i, rt in enumerate(row_tuples):
             for k in range(self.K):
                 U[i, k, :], _ = self._build_u_vector(rt, k)
-
-        def _pairwise_weighted_corr_safe(Z, W):
-            _, d = Z.shape
-            R = np.eye(d)
-            for i in range(d):
-                for j in range(i+1, d):
-                    mask = ~np.isnan(Z[:, i]) & ~np.isnan(Z[:, j])
-                    if not np.any(mask): R[i,j]=R[j,i]=0.0; continue
-                    w_sub, z_i, z_j = W[mask], Z[mask, i], Z[mask, j]
-                    w_sum = w_sub.sum()
-                    if w_sum < 1e-9: R[i,j]=R[j,i]=0.0; continue
-                    mu_i, mu_j = np.sum(w_sub*z_i)/w_sum, np.sum(w_sub*z_j)/w_sum
-                    cov = np.sum(w_sub*(z_i-mu_i)*(z_j-mu_j))/w_sum
-                    var_i, var_j = np.sum(w_sub*(z_i-mu_i)**2)/w_sum, np.sum(w_sub*(z_j-mu_j)**2)/w_sum
-                    rho = cov/np.sqrt(var_i*var_j) if var_i>1e-9 and var_j>1e-9 else 0.0
-                    R[i,j] = R[j,i] = np.clip(rho, -0.999, 0.999)
-            return R
             
         for k in range(self.K):
             Z = norm.ppf(np.clip(U[:, k, :], 1e-10, 1 - 1e-10))
-            R = _pairwise_weighted_corr_safe(Z, resp[:, k])
+            R = self._pairwise_weighted_corr(Z, resp[:, k])
             R = _shrink_corr(R, self.shrink_lambda) if self.shrink_lambda > 0 else _nearest_pd(R)
             
             diag = np.sqrt(np.diag(R))
@@ -556,8 +554,7 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
 
             Z = norm.ppf(np.clip(U_all[idx, k, :], 1e-10, 1 - 1e-10))
             
-            # This internal function should be defined within the parent class to be accessible
-            R = self._pairwise_weighted_corr_safe(Z, np.ones(len(idx)))
+            R = self._pairwise_weighted_corr(Z, np.ones(len(idx)))
             R = _shrink_corr(R, self.shrink_lambda) if self.shrink_lambda > 0 else _nearest_pd(R)
             
             diag = np.sqrt(np.diag(R))
@@ -571,7 +568,7 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
                 self.speedy_edges_[k] = _max_spanning_tree_from_corr(Rabs)
             else: # knn
                 self.speedy_edges_[k] = _knn_graph_edges(Rabs, k_per_node=self.speedy_k_per_node)
-
+    
     def _M_step(self, df, resp):
         """Combined M-step for Speedy mode."""
         self._M_step_marginals(df, resp)

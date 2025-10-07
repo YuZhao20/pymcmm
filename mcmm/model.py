@@ -41,7 +41,7 @@ def _shrink_corr(R, lam=0.05):
 def _submatrix(M, idx):
     """Extracts a submatrix from M based on indices."""
     idx = np.asarray(idx, dtype=int)
-    if M.ndim == 2:
+    if M.ndim == 2 and len(idx) > 0:
         return M[np.ix_(idx, idx)]
     return M
 
@@ -51,24 +51,23 @@ def _weighted_onehot_counts(values, categories, weights):
     vals, w = values[~mask], weights[~mask]
     idx = pd.Categorical(vals, categories=categories, ordered=False).codes
     L = len(categories)
-    out = np.zeros(L, float)
     if len(w) > 0:
         valid_idx = idx != -1
-        out = np.bincount(idx[valid_idx], weights=w[valid_idx], minlength=L)
-    return out
+        return np.bincount(idx[valid_idx], weights=w[valid_idx], minlength=L)
+    return np.zeros(L, float)
 
 # ---------- Continuous Marginal Distributions ----------
 
 def _gaussian_logdensity_scalar(x, mu, sig):
     z = (x - mu) / np.clip(sig, 1e-9, None)
-    return -0.5 * z * z - np.log(np.clip(sig, 1e-9, None)) - 0.5 * np.log(2 * np.pi)
+    return -0.5 * z * z - _safe_log(sig) - 0.5 * np.log(2 * np.pi)
 
 def _gaussian_cdf_scalar(x, mu, sig):
     return norm.cdf((x - mu) / np.clip(sig, 1e-9, None))
 
 def _studentt_logdensity_scalar(x, mu, sig, nu):
     z = (x - mu) / np.clip(sig, 1e-9, None)
-    return student_t.logpdf(z, df=nu) - np.log(np.clip(sig, 1e-9, None))
+    return student_t.logpdf(z, df=nu) - _safe_log(sig)
 
 def _studentt_cdf_scalar(x, mu, sig, nu):
     z = (x - mu) / np.clip(sig, 1e-9, None)
@@ -153,8 +152,8 @@ def _optimize_t_nu(z_list, w_list, nu_bounds=(2.1, 100.0)):
 # ---------- Speedy Mode Helpers ----------
 def _max_spanning_tree_from_corr(Rabs: np.ndarray):
     d = Rabs.shape[0]
-    in_tree = np.zeros(d, dtype=bool)
     if d == 0: return []
+    in_tree = np.zeros(d, dtype=bool)
     in_tree[0] = True
     edges = []
     for _ in range(d - 1):
@@ -358,8 +357,8 @@ class MCMMGaussianCopula:
 
     def _E_step(self, df):
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
-        log_resp = Parallel(n_jobs=self.n_jobs)(delayed(self._log_pk_row)(rt) for rt in row_tuples)
-        log_resp = np.array(log_resp)
+        log_resp_list = Parallel(n_jobs=self.n_jobs)(delayed(self._log_pk_row)(rt) for rt in row_tuples)
+        log_resp = np.array(log_resp_list)
 
         log_resp += _safe_log(self.pi_)
         ll_per_sample = logsumexp(log_resp, axis=1)
@@ -371,7 +370,7 @@ class MCMMGaussianCopula:
         # --- M-step for marginals ---
         if self.cont_cols_:
             Xc = df[self.cont_cols_].to_numpy(float)
-            all_z_t, all_w_t = [], [] if self.estimate_nu else None
+            all_z_t, all_w_t = [], []
             
             for k in range(self.K):
                 w_em = resp[:, k]
@@ -379,7 +378,7 @@ class MCMMGaussianCopula:
                     x_obs = Xc[:, j]; mask = ~np.isnan(x_obs)
                     if not mask.any(): continue
                     
-                    weights = w_em[mask]
+                    weights = w_em[mask].copy()
                     x_masked = x_obs[mask]
 
                     if self.cont_marginal == 'student_t':
@@ -415,7 +414,7 @@ class MCMMGaussianCopula:
 
         self.pi_ = resp.mean(axis=0)
 
-        if self.cont_marginal == 'student_t' and self.estimate_nu:
+        if self.cont_marginal == 'student_t' and self.estimate_nu and all_z_t:
             self.fitted_nu_ = _optimize_t_nu(all_z_t, all_w_t) or self.fitted_nu_
 
         # --- M-step for copulas ---
@@ -427,15 +426,15 @@ class MCMMGaussianCopula:
                 U[i, k, :], _ = self._build_u_vector(rt, k)
 
         def _pairwise_weighted_corr_safe(Z, W):
-            n, d = Z.shape
+            _, d = Z.shape
             R = np.eye(d)
             for i in range(d):
                 for j in range(i+1, d):
                     mask = ~np.isnan(Z[:, i]) & ~np.isnan(Z[:, j])
-                    if not np.any(mask): rho=0.0; R[i,j]=R[j,i]=rho; continue
+                    if not np.any(mask): R[i,j]=R[j,i]=0.0; continue
                     w_sub, z_i, z_j = W[mask], Z[mask, i], Z[mask, j]
                     w_sum = w_sub.sum()
-                    if w_sum < 1e-9: rho=0.0; R[i,j]=R[j,i]=rho; continue
+                    if w_sum < 1e-9: R[i,j]=R[j,i]=0.0; continue
                     mu_i, mu_j = np.sum(w_sub*z_i)/w_sum, np.sum(w_sub*z_j)/w_sum
                     cov = np.sum(w_sub*(z_i-mu_i)*(z_j-mu_j))/w_sum
                     var_i, var_j = np.sum(w_sub*(z_i-mu_i)**2)/w_sum, np.sum(w_sub*(z_j-mu_j)**2)/w_sum
@@ -512,10 +511,7 @@ class MCMMGaussianCopula:
 
 class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
     """
-    Speed-oriented variant of MCMM:
-    - Sparse pairwise pseudo-likelihood on a small graph of variables.
-    - Correlation estimation from weighted subsamples.
-    - Mini-batch E-step for memory efficiency.
+    Speed-oriented variant of MCMM.
     """
     def __init__(self, *args,
                  speedy_graph:str='mst',
@@ -531,14 +527,40 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
         self.speedy_edges_ = None
 
     def _M_step(self, df, resp):
-        # Speedy M-step is different: it also builds the graph
-        super()._M_step(df, resp) # Run the standard M-step first
-        
-        # Then, build the sparse graph for the copula
+        # First, update marginals using the standard M-step logic
+        super()._M_step_marginals(df, resp)
+
+        # Then, update copulas using the subsampling strategy for speed
+        n, d_all = len(df), len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
+        self.R_ = np.array([np.eye(d_all) for _ in range(self.K)])
         self.speedy_edges_ = [[] for _ in range(self.K)]
+
+        U_all = np.zeros((n, self.K, d_all))
+        row_tuples = list(df.itertuples(index=False, name='DataRow'))
+        for i, rt in enumerate(row_tuples):
+            for k in range(self.K):
+                U_all[i, k, :], _ = self._build_u_vector(rt, k)
+
         for k in range(self.K):
-            Rabs = np.abs(self.R_[k])
-            np.fill_diagonal(Rabs, 0.0)
+            w = resp[:, k]
+            p = w / max(w.sum(), 1e-12)
+            if np.any(np.isnan(p)) or p.sum() == 0:
+                idx = self.random_state.integers(0, n, size=min(self.corr_subsample, n))
+            else:
+                m = min(self.corr_subsample, n)
+                idx = self.random_state.choice(n, size=m, replace=False, p=p)
+
+            Z = norm.ppf(np.clip(U_all[idx, k, :], 1e-10, 1 - 1e-10))
+            R = self._pairwise_weighted_corr_safe(Z, np.ones(len(idx))) # Use safe version
+            R = _shrink_corr(R, self.shrink_lambda) if self.shrink_lambda > 0 else _nearest_pd(R)
+            
+            diag = np.sqrt(np.diag(R))
+            if not np.all(diag > 1e-9): continue
+            R /= np.outer(diag, diag)
+            np.fill_diagonal(R, 1.0)
+            self.R_[k] = R
+
+            Rabs = np.abs(R); np.fill_diagonal(Rabs, 0.0)
             if self.speedy_graph == 'mst':
                 self.speedy_edges_[k] = _max_spanning_tree_from_corr(Rabs)
             else: # knn
@@ -576,7 +598,6 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
         log_resp = np.zeros((n, self.K))
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
         
-        # Parallel processing of mini-batches
         results = Parallel(n_jobs=self.n_jobs)(
             delayed(self._process_batch)(row_tuples[s:min(n, s+B)]) for s in range(0, n, B)
         )

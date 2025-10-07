@@ -314,7 +314,6 @@ class MCMMGaussianCopula:
             levels = self.cat_levels_.get(c) or self.ord_levels_.get(c)
             probs = self.cat_probs_.get(c, self.ord_probs_.get(c))[k]
             try:
-                # Handle string conversion for non-string categories
                 x_str = str(x)
                 idx = levels.index(x_str if c in self.cat_levels_ else x)
                 log_marg += _safe_log(probs[idx])
@@ -366,8 +365,8 @@ class MCMMGaussianCopula:
         log_resp -= ll_per_sample[:, None]
         return np.exp(log_resp), loglik
 
-    def _M_step(self, df, resp):
-        # --- M-step for marginals ---
+    def _M_step_marginals(self, df, resp):
+        """M-step for marginal distribution parameters."""
         if self.cont_cols_:
             Xc = df[self.cont_cols_].to_numpy(float)
             all_z_t, all_w_t = [], []
@@ -417,7 +416,8 @@ class MCMMGaussianCopula:
         if self.cont_marginal == 'student_t' and self.estimate_nu and all_z_t:
             self.fitted_nu_ = _optimize_t_nu(all_z_t, all_w_t) or self.fitted_nu_
 
-        # --- M-step for copulas ---
+    def _M_step_copulas(self, df, resp):
+        """M-step for copula parameters (correlation matrices)."""
         d_all = len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
         U = np.zeros((len(df), self.K, d_all))
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
@@ -452,6 +452,11 @@ class MCMMGaussianCopula:
             R /= np.outer(diag, diag)
             np.fill_diagonal(R, 1.0)
             self.R_[k] = R
+
+    def _M_step(self, df, resp):
+        """Combined M-step."""
+        self._M_step_marginals(df, resp)
+        self._M_step_copulas(df, resp)
 
     def fit(self, df: pd.DataFrame, cont_cols=None, cat_cols=None, ord_cols=None):
         self._reset_fitted_attributes()
@@ -526,11 +531,8 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
         self.e_step_batch = int(e_step_batch)
         self.speedy_edges_ = None
 
-    def _M_step(self, df, resp):
-        # First, update marginals using the standard M-step logic
-        super()._M_step_marginals(df, resp)
-
-        # Then, update copulas using the subsampling strategy for speed
+    def _M_step_copulas(self, df, resp):
+        """Overridden M-step for copulas using subsampling and sparse graph."""
         n, d_all = len(df), len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
         self.R_ = np.array([np.eye(d_all) for _ in range(self.K)])
         self.speedy_edges_ = [[] for _ in range(self.K)]
@@ -566,6 +568,11 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
             else: # knn
                 self.speedy_edges_[k] = _knn_graph_edges(Rabs, k_per_node=self.speedy_k_per_node)
     
+    def _M_step(self, df, resp):
+        """Combined M-step for Speedy mode."""
+        self._M_step_marginals(df, resp)
+        self._M_step_copulas(df, resp)
+
     def _log_pk_row_speedy(self, row_tuple):
         log_pk = np.zeros(self.K)
         all_cols_map = {c: i for i, c in enumerate(self.cont_cols_ + self.cat_cols_ + self.ord_cols_)}

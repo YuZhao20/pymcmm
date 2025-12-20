@@ -1,12 +1,38 @@
-# mcmm package initializer
+# -*- coding: utf-8 -*-
+"""
+pymcmm - Mixed-Copula Mixture Model
+
+A Python library for clustering datasets with mixed continuous, categorical,
+and ordinal data types using Gaussian copula-based mixture models.
+
+Usage:
+    from mcmm import MCMMGaussianCopula, MCMMGaussianCopulaSpeedy
+    
+    # For large datasets, use Speedy mode
+    model = MCMMGaussianCopulaSpeedy(
+        n_components=4,
+        cont_marginal='student_t',
+        copula_likelihood='pairwise',
+        verbose=1
+    )
+    model.fit(df, cont_cols=['x1', 'x2'], cat_cols=['c1'], ord_cols=['o1'])
+    clusters = model.predict(df)
+"""
 
 from .model import MCMMGaussianCopula, MCMMGaussianCopulaSpeedy
 
-__all__ = [
-    "MCMMGaussianCopula",
-    "MCMMGaussianCopulaSpeedy",
-    "check_acceleration"
-]
+__version__ = "0.2.0"
+__all__ = ["MCMMGaussianCopula", "MCMMGaussianCopulaSpeedy"]
+
+# Cython acceleration status
+_CYTHON_AVAILABLE = False
+
+try:
+    from ._fast_core import benchmark as _benchmark
+    _CYTHON_AVAILABLE = True
+except ImportError:
+    _benchmark = None
+
 
 def check_acceleration():
     """
@@ -14,27 +40,33 @@ def check_acceleration():
     
     Returns
     -------
-    dict
-        Dictionary with acceleration status information:
-        - 'available': bool, whether Cython acceleration is available
-        - 'version': str or None, Cython version if available
-        - 'functions': list, list of accelerated function names
+    bool
+        True if Cython acceleration is enabled, False otherwise.
+    
+    Examples
+    --------
+    >>> import mcmm
+    >>> mcmm.check_acceleration()
+    ✓ Cython acceleration is enabled (35x faster)
+    True
     """
-    try:
-        from . import _fast_core
-        import cython
-        return {
-            'available': True,
-            'version': cython.__version__,
-            'functions': [
-                'log_gaussian_copula_density_full',
-                'log_bivariate_gaussian_copula',
-                'pairwise_weighted_corr_fast'
-            ]
-        }
-    except ImportError:
-        return {
-            'available': False,
-            'version': None,
-            'functions': []
-        }
+    if _CYTHON_AVAILABLE:
+        print("✓ Cython acceleration is enabled (35x faster)")
+        return True
+    else:
+        print("✗ Cython acceleration is NOT available (using pure Python)")
+        print("  To enable, run: pip install cython && python setup.py build_ext --inplace")
+        return False
+
+
+def run_benchmark():
+    """
+    Run performance benchmark comparing scipy vs Cython implementations.
+    
+    Only available when Cython acceleration is enabled.
+    """
+    if _benchmark is not None:
+        _benchmark()
+    else:
+        print("Benchmark not available. Cython module not compiled.")
+        print("To enable, run: pip install cython && python setup.py build_ext --inplace")

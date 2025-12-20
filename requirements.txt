@@ -1,16 +1,13 @@
 # Core dependencies
-numpy
-pandas
-scikit-learn
-scipy
-joblib
+numpy>=1.20
+pandas>=1.3
+scipy>=1.7
+scikit-learn>=1.0
+joblib>=1.0
 
-# Optional: Cython for acceleration (provides up to 35x speedup)
-# Uncomment the line below to enable Cython acceleration
-# cython>=0.29.0
+# Optional: Cython acceleration
+# cython>=0.29
 
-# Optional: Benchmark and visualization dependencies
-# Uncomment the lines below for experiments
-# kmodes
-# matplotlib
-# seaborn
+# Development
+# pytest>=6.0
+# pytest-cov>=2.0

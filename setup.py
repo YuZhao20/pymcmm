@@ -1,66 +1,128 @@
-from setuptools import setup, find_packages, Extension
-from setuptools.command.build_ext import build_ext
-import numpy as np
-import os
+"""
+pymcmm - Mixed-Copula Mixture Model
 
-# Try to import Cython
+Installation:
+    # Basic installation (pure Python)
+    pip install .
+    
+    # With Cython acceleration (recommended)
+    pip install .
+    python setup.py build_ext --inplace
+    
+    # Development mode
+    pip install -e ".[dev]"
+"""
+
+import sys
+import os
+from setuptools import setup, Extension, find_packages
+
+# Cythonが利用可能か確認
+USE_CYTHON = False
+ext_modules = []
+
 try:
     from Cython.Build import cythonize
-    CYTHON_AVAILABLE = True
+    import numpy as np
+    USE_CYTHON = True
 except ImportError:
-    CYTHON_AVAILABLE = False
-    cythonize = None
+    pass
 
-with open("README.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+if USE_CYTHON:
+    # プラットフォーム別コンパイルフラグ
+    if sys.platform == "darwin":  # macOS
+        extra_compile_args = ["-O3"]
+        extra_link_args = []
+        # OpenMP (optional, requires libomp from Homebrew)
+        if os.path.exists("/opt/homebrew/opt/libomp"):
+            extra_compile_args.extend(["-Xpreprocessor", "-fopenmp", "-I/opt/homebrew/opt/libomp/include"])
+            extra_link_args.extend(["-L/opt/homebrew/opt/libomp/lib", "-lomp"])
+        elif os.path.exists("/usr/local/opt/libomp"):
+            extra_compile_args.extend(["-Xpreprocessor", "-fopenmp", "-I/usr/local/opt/libomp/include"])
+            extra_link_args.extend(["-L/usr/local/opt/libomp/lib", "-lomp"])
+    elif sys.platform == "linux":
+        extra_compile_args = ["-O3"]
+        extra_link_args = []
+    elif sys.platform == "win32":
+        extra_compile_args = ["/O2"]
+        extra_link_args = []
+    else:
+        extra_compile_args = ["-O3"]
+        extra_link_args = []
 
-# Define Cython extensions
-extensions = []
-if CYTHON_AVAILABLE:
     extensions = [
         Extension(
             "mcmm._fast_core",
-            ["mcmm/_fast_core.pyx"],
+            sources=["mcmm/_fast_core.pyx"],
             include_dirs=[np.get_include()],
-            extra_compile_args=["-O3"],
+            extra_compile_args=extra_compile_args,
+            extra_link_args=extra_link_args,
+            define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
+            language="c",
         )
     ]
-    extensions = cythonize(extensions, compiler_directives={
-        'language_level': "3",
-        'boundscheck': False,
-        'wraparound': False,
-    })
+    
+    ext_modules = cythonize(
+        extensions,
+        language_level=3,
+        compiler_directives={
+            "boundscheck": False,
+            "wraparound": False,
+            "cdivision": True,
+            "initializedcheck": False,
+            "nonecheck": False,
+        },
+    )
+
+# READMEを読み込み
+long_description = ""
+if os.path.exists("README.md"):
+    with open("README.md", encoding="utf-8") as f:
+        long_description = f.read()
 
 setup(
     name="pymcmm",
     version="0.2.0",
-    author="Yu Zhao",
-    author_email="yu.zhao@rs.tus.ac.jp",
-    description="混合コピュラ混合モデル（MCMM）のPython実装",
+    description="Mixed-Copula Mixture Model for clustering mixed-type data",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/YuZhao20/pymcmm",
-    packages=find_packages(include=["mcmm", "experiments", "experiments.*"]),
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
-        "Operating System :: OS Independent",
-        "Intended Audience :: Science/Research",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    ],
-    python_requires='>=3.8',
+    author="pymcmm developers",
+    url="https://github.com/your-username/pymcmm",
+    license="MIT",
+    packages=find_packages(),
+    ext_modules=ext_modules,
+    python_requires=">=3.8",
     install_requires=[
-        "numpy",
-        "pandas",
-        "scikit-learn",
-        "scipy",
-        "joblib",
+        "numpy>=1.20",
+        "pandas>=1.3",
+        "scipy>=1.7",
+        "scikit-learn>=1.0",
+        "joblib>=1.0",
     ],
     extras_require={
-        "bench": ["kmodes", "matplotlib", "seaborn"],
-        "cython": ["cython>=0.29.0"],
+        "dev": [
+            "cython>=0.29",
+            "pytest>=6.0",
+            "pytest-cov>=2.0",
+        ],
+        "cython": [
+            "cython>=0.29",
+        ],
     },
-    ext_modules=extensions,
-    include_dirs=[np.get_include()],
+    classifiers=[
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Science/Research",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Cython",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Information Analysis",
+    ],
+    keywords="clustering, mixture-model, copula, mixed-data, machine-learning",
     zip_safe=False,
 )

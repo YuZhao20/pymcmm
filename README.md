@@ -1,172 +1,264 @@
 # pymcmm
 
-混合コピュラ混合モデル（Mixed-Copula Mixture Model, MCMM）のPython実装
+**Mixed-Copula Mixture Model (MCMM)** for clustering datasets with mixed continuous, categorical, and ordinal data types.
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 概要
+## Features
 
-pymcmmは、連続変数、カテゴリ変数、順序変数を含む混合データセットのクラスタリングを可能にする混合コピュラ混合モデル（MCMM）の実装です。ガウシアンコピュラを使用し、Student-t分布とガウス分布の両方をマージナル分布としてサポートしています。
+- **Mixed Data Types**: Handle continuous, categorical, and ordinal variables simultaneously
+- **Gaussian Copula**: Capture complex dependencies between variables
+- **Missing Values**: Native support for missing data
+- **Student-t Marginals**: Robust to outliers with automatic degree of freedom estimation
+- **Speedy Mode**: Efficient computation for large datasets using sparse MST/KNN graphs
+- **Cython Acceleration**: Optional 35x speedup with Cython (v0.2.0+)
 
-## 主な特徴
+## Installation
 
-- **混合データ型のサポート**: 連続、カテゴリ、順序変数を同時に処理
-- **Cython高速化**: オプショナルなCython実装により最大35倍の高速化（v0.2.0）
-- **柔軟なマージナル分布**: Student-t分布とガウス分布の選択が可能
-- **2つのコピュラモード**: 完全尤度とペアワイズ尤度
-- **スピーディモード**: 大規模データセット向けの最適化モード
-- **数値的安定性**: 堅牢な数値計算とエラーハンドリング
-
-## インストール
-
-### 基本的なインストール
+### Basic Installation
 
 ```bash
 pip install pymcmm
 ```
 
-### Cython高速化付きインストール（推奨）
+### With Cython Acceleration (Recommended)
 
 ```bash
-pip install pymcmm[cython]
-```
-
-または
-
-```bash
+pip install pymcmm
 pip install cython
-pip install pymcmm
+cd /path/to/pymcmm
+python setup.py build_ext --inplace
 ```
 
-### 開発モードでのインストール
-
-```bash
-git clone https://github.com/YuZhao20/pymcmm.git
-cd pymcmm
-pip install -e .
+Verify acceleration:
+```python
+import mcmm
+mcmm.check_acceleration()
+# ✓ Cython acceleration is enabled (35x faster)
 ```
 
-Cython高速化を有効にする場合:
-
-```bash
-pip install -e ".[cython]"
-```
-
-## クイックスタート
+## Quick Start
 
 ```python
 import pandas as pd
-from mcmm import MCMMGaussianCopula, check_acceleration
+from mcmm import MCMMGaussianCopulaSpeedy
 
-# Cython高速化の状態を確認
-accel_info = check_acceleration()
-print(f"Cython acceleration: {accel_info['available']}")
-
-# データの準備
+# Prepare your data
 df = pd.DataFrame({
-    'continuous1': [1.0, 2.0, 3.0, 4.0, 5.0],
-    'continuous2': [2.0, 3.0, 4.0, 5.0, 6.0],
-    'categorical': ['A', 'B', 'A', 'B', 'A'],
-    'ordinal': [1, 2, 3, 2, 1]
+    'income': [50000, 60000, 75000, ...],      # continuous
+    'age': [25, 35, 45, ...],                   # continuous
+    'gender': ['M', 'F', 'M', ...],             # categorical
+    'satisfaction': [1, 2, 3, 4, 5, ...],       # ordinal
 })
 
-# モデルの作成と学習
-model = MCMMGaussianCopula(
-    n_components=2,
-    cont_marginal='student_t',
+# Create and fit model
+model = MCMMGaussianCopulaSpeedy(
+    n_components=3,           # number of clusters
+    cont_marginal='student_t', # robust to outliers
     copula_likelihood='pairwise',
-    max_iter=100,
-    random_state=42
+    verbose=1
 )
 
-model.fit(df, 
-          cont_cols=['continuous1', 'continuous2'],
-          cat_cols=['categorical'],
-          ord_cols=['ordinal'])
+model.fit(
+    df,
+    cont_cols=['income', 'age'],
+    cat_cols=['gender'],
+    ord_cols=['satisfaction']
+)
 
-# 予測
-labels = model.predict(df)
+# Predict clusters
+clusters = model.predict(df)
 probabilities = model.predict_proba(df)
 
-print(f"Log-likelihood: {model.loglik_:.3f}")
-print(f"BIC: {model.bic_:.3f}")
+# Model evaluation
+print(f"BIC: {model.bic_:.2f}")
+print(f"Log-likelihood: {model.loglik_:.2f}")
 ```
 
-## API リファレンス
+## Model Classes
 
 ### MCMMGaussianCopula
 
-主要なクラス。混合データのクラスタリングを実行します。
+Full copula model with O(p²) pairwise dependencies.
 
-#### パラメータ
+```python
+from mcmm import MCMMGaussianCopula
 
-- `n_components` (int): クラスタ数（デフォルト: 3）
-- `max_iter` (int): 最大反復回数（デフォルト: 100）
-- `tol` (float): 収束判定の許容誤差（デフォルト: 1e-4）
-- `cont_marginal` (str): 連続変数のマージナル分布。`'gaussian'` または `'student_t'`（デフォルト: `'student_t'`）
-- `t_nu` (float): Student-t分布の自由度（デフォルト: 5.0）
-- `estimate_nu` (bool): 自由度を推定するか（デフォルト: True）
-- `ord_marginal` (str): 順序変数のマージナル分布。`'freq'` または `'cumlogit'`（デフォルト: `'cumlogit'`）
-- `copula_likelihood` (str): コピュラ尤度の計算方法。`'full'` または `'pairwise'`（デフォルト: `'full'`）
-- `pairwise_weight` (str): ペアワイズ重み。`'uniform'` または `'abs_rho'`（デフォルト: `'abs_rho'`）
-- `shrink_lambda` (float): 相関行列の縮小パラメータ（デフォルト: 0.05）
-- `random_state` (int): 乱数シード（デフォルト: None）
-- `verbose` (int): 詳細度（デフォルト: 0）
-- `n_jobs` (int): 並列処理のジョブ数（デフォルト: 1）
-
-#### メソッド
-
-- `fit(df, cont_cols=None, cat_cols=None, ord_cols=None)`: モデルを学習
-- `predict(df)`: クラスタラベルを予測
-- `predict_proba(df)`: クラスタ確率を予測
-- `score_samples(df)`: 各サンプルの対数尤度を計算
-- `detect_outliers(df, q=1.0)`: 外れ値を検出
+model = MCMMGaussianCopula(
+    n_components=3,
+    cont_marginal='student_t',  # 'gaussian' or 'student_t'
+    copula_likelihood='pairwise',  # 'full' or 'pairwise'
+    max_iter=100,
+    verbose=1
+)
+```
 
 ### MCMMGaussianCopulaSpeedy
 
-大規模データセット向けの高速化バージョン。
-
-追加パラメータ:
-- `speedy_graph` (str): グラフタイプ。`'mst'` または `'knn'`（デフォルト: `'mst'`）
-- `speedy_k_per_node` (int): KNNグラフの各ノードあたりのエッジ数（デフォルト: 3）
-- `corr_subsample` (int): 相関計算のサブサンプルサイズ（デフォルト: 3000）
-- `e_step_batch` (int): Eステップのバッチサイズ（デフォルト: 4096）
-
-### check_acceleration()
-
-Cython高速化の利用可能性を確認します。
+Optimized for large datasets using sparse graph approximation.
 
 ```python
-from mcmm import check_acceleration
+from mcmm import MCMMGaussianCopulaSpeedy
 
-info = check_acceleration()
-print(info)
-# {'available': True, 'version': '3.0.0', 'functions': [...]}
+model = MCMMGaussianCopulaSpeedy(
+    n_components=3,
+    cont_marginal='student_t',
+    speedy_graph='mst',        # 'mst' or 'knn'
+    corr_subsample=3000,       # subsample size for correlation
+    n_jobs=-1,                 # parallel processing
+    verbose=1
+)
 ```
 
-## パフォーマンス
+## Parameters
 
-v0.2.0では、Cython実装により最大35倍の高速化を実現しています。Cythonが利用可能な場合、以下の関数が自動的に高速化されます:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `n_components` | 3 | Number of clusters |
+| `cont_marginal` | 'student_t' | Marginal for continuous vars: 'gaussian' or 'student_t' |
+| `t_nu` | 5.0 | Initial degrees of freedom for Student-t |
+| `estimate_nu` | True | Estimate nu from data |
+| `ord_marginal` | 'cumlogit' | Ordinal marginal: 'cumlogit' or 'freq' |
+| `copula_likelihood` | 'pairwise' | Copula type: 'full' or 'pairwise' |
+| `pairwise_weight` | 'abs_rho' | Pairwise weight: 'abs_rho' or 'uniform' |
+| `shrink_lambda` | 0.05 | Correlation matrix shrinkage |
+| `max_iter` | 100 | Maximum EM iterations |
+| `tol` | 1e-4 | Convergence tolerance |
+| `n_jobs` | 1 | Number of parallel jobs (-1 for all cores) |
+| `random_state` | None | Random seed for reproducibility |
+| `verbose` | 0 | Verbosity level |
 
-- `log_gaussian_copula_density_full`: 完全ガウシアンコピュラ密度の対数計算
-- `log_bivariate_gaussian_copula`: 二変量ガウシアンコピュラ密度の対数計算
-- `pairwise_weighted_corr_fast`: ペアワイズ重み付き相関計算
+### Speedy Mode Additional Parameters
 
-Cythonが利用できない場合でも、純Python実装に自動的にフォールバックするため、機能は完全に利用可能です。
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `speedy_graph` | 'mst' | Graph type: 'mst' or 'knn' |
+| `speedy_k_per_node` | 3 | K for KNN graph |
+| `corr_subsample` | 3000 | Subsample size for correlation estimation |
+| `e_step_batch` | 4096 | Batch size for E-step |
 
-## ライセンス
+## Performance
 
-MIT License - 詳細は [LICENSE](LICENSE) を参照してください。
+### Speed Comparison (n=500, p=13, K=3)
 
-## 著者
+| Version | Time | Speedup |
+|---------|------|---------|
+| Pure Python | 65.4s | 1x |
+| Cython | 1.9s | **35x** |
 
-Yu Zhao (yu.zhao@rs.tus.ac.jp)
+### Scalability Guidelines
 
-## リポジトリ
+| Dataset Size | Recommended Mode |
+|--------------|------------------|
+| n < 1,000 | MCMMGaussianCopula |
+| n < 10,000 | MCMMGaussianCopulaSpeedy |
+| n > 10,000 | MCMMGaussianCopulaSpeedy + n_jobs=-1 |
 
-https://github.com/YuZhao20/pymcmm
+## Methods
 
-## 変更履歴
+### Fitting
 
-詳細は [CHANGELOG.md](CHANGELOG.md) を参照してください。
+```python
+model.fit(df, cont_cols=None, cat_cols=None, ord_cols=None)
+```
+
+### Prediction
+
+```python
+# Hard cluster assignment
+clusters = model.predict(df)
+
+# Cluster probabilities
+proba = model.predict_proba(df)
+
+# Per-sample log-likelihood
+log_lik = model.score_samples(df)
+```
+
+### Outlier Detection
+
+```python
+is_outlier, scores, threshold = model.detect_outliers(df, q=1.0)
+```
+
+## Attributes (after fitting)
+
+| Attribute | Description |
+|-----------|-------------|
+| `pi_` | Cluster mixing proportions (K,) |
+| `mu_` | Cluster means for continuous vars (K, p_cont) |
+| `sig_` | Cluster stds for continuous vars (K, p_cont) |
+| `R_` | Correlation matrices (K, p, p) |
+| `fitted_nu_` | Estimated degrees of freedom |
+| `loglik_` | Final log-likelihood |
+| `bic_` | Bayesian Information Criterion |
+| `history_` | Log-likelihood history |
+
+## Example: Customer Segmentation
+
+```python
+import pandas as pd
+import numpy as np
+from mcmm import MCMMGaussianCopulaSpeedy
+
+# Load customer data
+df = pd.read_csv('customers.csv')
+
+# Handle missing values (MCMM supports them natively)
+# No imputation needed!
+
+# Fit model with multiple K values
+results = []
+for k in range(2, 8):
+    model = MCMMGaussianCopulaSpeedy(
+        n_components=k,
+        random_state=42,
+        verbose=0
+    )
+    model.fit(df, 
+              cont_cols=['income', 'age', 'spending'],
+              cat_cols=['region', 'gender'],
+              ord_cols=['satisfaction'])
+    results.append({'k': k, 'bic': model.bic_, 'loglik': model.loglik_})
+
+# Select best K by BIC
+best = min(results, key=lambda x: x['bic'])
+print(f"Best K: {best['k']} (BIC: {best['bic']:.2f})")
+```
+
+## Changelog
+
+### v0.2.0 (2024-12)
+- **NEW**: Cython acceleration (35x speedup)
+- **NEW**: Automatic fallback to pure Python when Cython unavailable
+- **NEW**: `check_acceleration()` and `run_benchmark()` functions
+- Improved numerical stability in copula calculations
+- Fixed edge cases in Student-t CDF computation
+
+### v0.1.0 (2024-10)
+- Initial release
+- MCMMGaussianCopula and MCMMGaussianCopulaSpeedy
+- Support for mixed continuous, categorical, and ordinal data
+- Missing value handling
+
+## Citation
+
+If you use pymcmm in your research, please cite:
+
+```bibtex
+@software{pymcmm,
+  title = {pymcmm: Mixed-Copula Mixture Model for Python},
+  author = {pymcmm developers},
+  year = {2024},
+  url = {https://github.com/your-username/pymcmm}
+}
+```
+
+## License
+
+MIT License
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.

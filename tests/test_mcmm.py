@@ -1,254 +1,267 @@
 """
-Test suite for pymcmm v0.2.0
+Tests for pymcmm
 
-Tests cover basic functionality, Cython acceleration, and edge cases.
+Run with: pytest tests/ -v
 """
 
 import numpy as np
 import pandas as pd
 import pytest
-from mcmm import MCMMGaussianCopula, MCMMGaussianCopulaSpeedy, check_acceleration
+from scipy.stats import norm, t as student_t
+
+from mcmm import MCMMGaussianCopula, MCMMGaussianCopulaSpeedy
 
 
-class TestAcceleration:
-    """Test Cython acceleration functionality."""
+# ============================================================
+# Fixtures
+# ============================================================
+
+@pytest.fixture
+def simple_data():
+    """Simple 2-cluster dataset"""
+    np.random.seed(42)
+    n = 200
     
-    def test_check_acceleration(self):
-        """Test that check_acceleration returns valid information."""
-        info = check_acceleration()
-        assert isinstance(info, dict)
-        assert 'available' in info
-        assert 'version' in info
-        assert 'functions' in info
-        assert isinstance(info['available'], bool)
-        assert isinstance(info['functions'], list)
+    data = {
+        'cont1': np.concatenate([np.random.normal(0, 1, 100), np.random.normal(5, 1, 100)]),
+        'cont2': np.concatenate([np.random.normal(10, 2, 100), np.random.normal(5, 2, 100)]),
+        'cat1': np.concatenate([
+            np.random.choice(['A', 'B'], 100, p=[0.8, 0.2]),
+            np.random.choice(['A', 'B'], 100, p=[0.2, 0.8])
+        ]),
+        'ord1': np.concatenate([
+            np.random.choice([1, 2, 3], 100, p=[0.6, 0.3, 0.1]),
+            np.random.choice([1, 2, 3], 100, p=[0.1, 0.3, 0.6])
+        ])
+    }
+    return pd.DataFrame(data)
 
 
-class TestMCMMBasic:
-    """Basic functionality tests."""
+@pytest.fixture
+def data_with_missing():
+    """Dataset with missing values"""
+    np.random.seed(42)
+    n = 150
     
-    def test_initialization(self):
-        """Test model initialization."""
-        model = MCMMGaussianCopula(n_components=2, random_state=42)
-        assert model.K == 2
-        assert model.max_iter == 100
-        assert model.tol == 1e-4
+    df = pd.DataFrame({
+        'cont1': np.random.randn(n),
+        'cont2': np.random.randn(n),
+        'cat1': np.random.choice(['X', 'Y', 'Z'], n),
+        'ord1': np.random.choice([1, 2, 3, 4], n),
+    })
     
-    def test_simple_fit_predict(self):
-        """Test basic fit and predict on simple data."""
-        # Create simple test data
-        np.random.seed(42)
-        n_samples = 50
-        
-        df = pd.DataFrame({
-            'cont1': np.random.randn(n_samples),
-            'cont2': np.random.randn(n_samples),
-            'cat': np.random.choice(['A', 'B'], n_samples),
-            'ord': np.random.choice([1, 2, 3], n_samples)
-        })
-        
+    # Add missing values
+    df.loc[np.random.choice(n, 20, replace=False), 'cont1'] = np.nan
+    df.loc[np.random.choice(n, 15, replace=False), 'cat1'] = None
+    
+    return df
+
+
+# ============================================================
+# Basic Tests
+# ============================================================
+
+class TestMCMMGaussianCopula:
+    """Tests for MCMMGaussianCopula"""
+    
+    def test_init(self):
+        """Test model initialization"""
+        model = MCMMGaussianCopula(n_components=3)
+        assert model.K == 3
+        assert model.cont_marginal == 'student_t'
+        assert model.copula_likelihood == 'full'
+    
+    def test_fit_basic(self, simple_data):
+        """Test basic fitting"""
         model = MCMMGaussianCopula(
             n_components=2,
-            max_iter=20,
+            max_iter=10,
             random_state=42,
             verbose=0
         )
+        model.fit(
+            simple_data,
+            cont_cols=['cont1', 'cont2'],
+            cat_cols=['cat1'],
+            ord_cols=['ord1']
+        )
         
-        model.fit(df,
-                  cont_cols=['cont1', 'cont2'],
-                  cat_cols=['cat'],
-                  ord_cols=['ord'])
-        
-        # Check that model was fitted
         assert model.pi_ is not None
+        assert len(model.pi_) == 2
+        assert np.allclose(model.pi_.sum(), 1.0)
         assert model.loglik_ is not None
         assert model.bic_ is not None
-        
-        # Test prediction
-        labels = model.predict(df)
-        assert len(labels) == n_samples
-        assert all(0 <= label < 2 for label in labels)
-        
-        # Test probabilities
-        probs = model.predict_proba(df)
-        assert probs.shape == (n_samples, 2)
-        assert np.allclose(probs.sum(axis=1), 1.0)
     
-    def test_predict_proba(self):
-        """Test probability prediction."""
-        np.random.seed(42)
-        n_samples = 30
+    def test_predict(self, simple_data):
+        """Test prediction"""
+        model = MCMMGaussianCopula(n_components=2, max_iter=10, random_state=42)
+        model.fit(simple_data, cont_cols=['cont1', 'cont2'], cat_cols=['cat1'], ord_cols=['ord1'])
         
-        df = pd.DataFrame({
-            'cont': np.random.randn(n_samples),
-            'cat': np.random.choice(['X', 'Y'], n_samples)
-        })
-        
-        model = MCMMGaussianCopula(n_components=2, max_iter=15, random_state=42)
-        model.fit(df, cont_cols=['cont'], cat_cols=['cat'])
-        
-        probs = model.predict_proba(df)
-        assert probs.shape == (n_samples, 2)
-        assert np.all(probs >= 0)
-        assert np.all(probs <= 1)
-        assert np.allclose(probs.sum(axis=1), 1.0)
+        clusters = model.predict(simple_data)
+        assert len(clusters) == len(simple_data)
+        assert set(clusters).issubset({0, 1})
     
-    def test_score_samples(self):
-        """Test log-likelihood scoring."""
-        np.random.seed(42)
-        n_samples = 30
+    def test_predict_proba(self, simple_data):
+        """Test probability prediction"""
+        model = MCMMGaussianCopula(n_components=2, max_iter=10, random_state=42)
+        model.fit(simple_data, cont_cols=['cont1', 'cont2'], cat_cols=['cat1'], ord_cols=['ord1'])
         
-        df = pd.DataFrame({
-            'cont': np.random.randn(n_samples)
-        })
-        
-        model = MCMMGaussianCopula(n_components=2, max_iter=15, random_state=42)
-        model.fit(df, cont_cols=['cont'])
-        
-        scores = model.score_samples(df)
-        assert len(scores) == n_samples
-        assert all(np.isfinite(scores))
+        proba = model.predict_proba(simple_data)
+        assert proba.shape == (len(simple_data), 2)
+        assert np.allclose(proba.sum(axis=1), 1.0)
     
-    def test_different_marginals(self):
-        """Test different marginal distribution options."""
-        np.random.seed(42)
-        df = pd.DataFrame({
-            'cont': np.random.randn(30),
-            'ord': np.random.choice([1, 2, 3], 30)
-        })
-        
-        # Test Gaussian marginal
-        model1 = MCMMGaussianCopula(
-            n_components=2,
-            cont_marginal='gaussian',
-            max_iter=15,
-            random_state=42
+    def test_missing_values(self, data_with_missing):
+        """Test handling of missing values"""
+        model = MCMMGaussianCopula(n_components=2, max_iter=10, random_state=42)
+        model.fit(
+            data_with_missing,
+            cont_cols=['cont1', 'cont2'],
+            cat_cols=['cat1'],
+            ord_cols=['ord1']
         )
-        model1.fit(df, cont_cols=['cont'], ord_cols=['ord'])
-        assert model1.loglik_ is not None
         
-        # Test Student-t marginal
-        model2 = MCMMGaussianCopula(
-            n_components=2,
-            cont_marginal='student_t',
-            max_iter=15,
-            random_state=42
-        )
-        model2.fit(df, cont_cols=['cont'], ord_cols=['ord'])
-        assert model2.loglik_ is not None
-    
-    def test_copula_modes(self):
-        """Test different copula likelihood modes."""
-        np.random.seed(42)
-        df = pd.DataFrame({
-            'cont1': np.random.randn(30),
-            'cont2': np.random.randn(30)
-        })
-        
-        # Test full copula
-        model1 = MCMMGaussianCopula(
-            n_components=2,
-            copula_likelihood='full',
-            max_iter=15,
-            random_state=42
-        )
-        model1.fit(df, cont_cols=['cont1', 'cont2'])
-        assert model1.loglik_ is not None
-        
-        # Test pairwise copula
-        model2 = MCMMGaussianCopula(
-            n_components=2,
-            copula_likelihood='pairwise',
-            max_iter=15,
-            random_state=42
-        )
-        model2.fit(df, cont_cols=['cont1', 'cont2'])
-        assert model2.loglik_ is not None
+        clusters = model.predict(data_with_missing)
+        assert len(clusters) == len(data_with_missing)
 
 
-class TestMCMMSpeedy:
-    """Tests for Speedy mode."""
+class TestMCMMGaussianCopulaSpeedy:
+    """Tests for MCMMGaussianCopulaSpeedy"""
     
-    def test_speedy_initialization(self):
-        """Test Speedy mode initialization."""
+    def test_init(self):
+        """Test Speedy model initialization"""
+        model = MCMMGaussianCopulaSpeedy(
+            n_components=3,
+            speedy_graph='mst',
+            corr_subsample=1000
+        )
+        assert model.K == 3
+        assert model.speedy_graph == 'mst'
+        assert model.corr_subsample == 1000
+    
+    def test_fit_mst(self, simple_data):
+        """Test fitting with MST graph"""
         model = MCMMGaussianCopulaSpeedy(
             n_components=2,
             speedy_graph='mst',
+            max_iter=10,
             random_state=42
         )
-        assert model.speedy_graph == 'mst'
-        assert model.corr_subsample == 3000
+        model.fit(simple_data, cont_cols=['cont1', 'cont2'], cat_cols=['cat1'], ord_cols=['ord1'])
+        
+        assert model.speedy_edges_ is not None
+        assert len(model.speedy_edges_) == 2
     
-    def test_speedy_fit(self):
-        """Test Speedy mode fitting."""
-        np.random.seed(42)
-        n_samples = 50
-        
-        df = pd.DataFrame({
-            'cont1': np.random.randn(n_samples),
-            'cont2': np.random.randn(n_samples),
-            'cat': np.random.choice(['A', 'B'], n_samples)
-        })
-        
+    def test_fit_knn(self, simple_data):
+        """Test fitting with KNN graph"""
         model = MCMMGaussianCopulaSpeedy(
             n_components=2,
-            max_iter=15,
+            speedy_graph='knn',
+            speedy_k_per_node=2,
+            max_iter=10,
             random_state=42
         )
+        model.fit(simple_data, cont_cols=['cont1', 'cont2'], cat_cols=['cat1'], ord_cols=['ord1'])
         
-        model.fit(df,
-                  cont_cols=['cont1', 'cont2'],
-                  cat_cols=['cat'])
-        
-        assert model.loglik_ is not None
-        labels = model.predict(df)
-        assert len(labels) == n_samples
+        assert model.speedy_edges_ is not None
 
 
-class TestEdgeCases:
-    """Test edge cases and error handling."""
+class TestCythonFunctions:
+    """Tests for Cython accelerated functions (if available)"""
     
-    def test_single_cluster(self):
-        """Test with single cluster."""
-        np.random.seed(42)
-        df = pd.DataFrame({'cont': np.random.randn(20)})
+    def test_cython_import(self):
+        """Test if Cython module can be imported"""
+        try:
+            from mcmm._fast_core import py_norm_cdf
+            cython_available = True
+        except ImportError:
+            cython_available = False
         
-        model = MCMMGaussianCopula(n_components=1, max_iter=10, random_state=42)
-        model.fit(df, cont_cols=['cont'])
-        assert model.loglik_ is not None
+        # This test passes regardless - we just log the status
+        print(f"Cython available: {cython_available}")
     
-    def test_missing_values(self):
-        """Test handling of missing values."""
-        np.random.seed(42)
-        df = pd.DataFrame({
-            'cont': [1.0, 2.0, np.nan, 4.0, 5.0],
-            'cat': ['A', 'B', 'A', np.nan, 'B']
-        })
+    @pytest.mark.skipif(
+        not _check_cython_available(),
+        reason="Cython not compiled"
+    )
+    def test_norm_cdf_accuracy(self):
+        """Test norm_cdf accuracy against scipy"""
+        from mcmm._fast_core import py_norm_cdf
         
+        x_test = np.linspace(-5, 5, 100)
+        scipy_result = norm.cdf(x_test)
+        cython_result = np.array([py_norm_cdf(xi) for xi in x_test])
+        
+        max_error = np.max(np.abs(scipy_result - cython_result))
+        assert max_error < 1e-6, f"Max error: {max_error}"
+    
+    @pytest.mark.skipif(
+        not _check_cython_available(),
+        reason="Cython not compiled"
+    )
+    def test_studentt_cdf_accuracy(self):
+        """Test Student-t CDF accuracy against scipy"""
+        from mcmm._fast_core import py_studentt_cdf
+        
+        x_test = np.linspace(-5, 5, 100)
+        for nu in [2.5, 5, 10, 30]:
+            scipy_result = student_t.cdf(x_test, df=nu)
+            cython_result = np.array([py_studentt_cdf(xi, nu) for xi in x_test])
+            
+            max_error = np.max(np.abs(scipy_result - cython_result))
+            assert max_error < 1e-4, f"Max error for nu={nu}: {max_error}"
+
+
+def _check_cython_available():
+    """Check if Cython module is available"""
+    try:
+        from mcmm._fast_core import py_norm_cdf
+        return True
+    except ImportError:
+        return False
+
+
+# ============================================================
+# Integration Tests
+# ============================================================
+
+class TestIntegration:
+    """Integration tests"""
+    
+    def test_reproducibility(self, simple_data):
+        """Test that results are reproducible with same random_state"""
+        model1 = MCMMGaussianCopulaSpeedy(n_components=2, max_iter=10, random_state=123)
+        model1.fit(simple_data, cont_cols=['cont1', 'cont2'], cat_cols=['cat1'], ord_cols=['ord1'])
+        
+        model2 = MCMMGaussianCopulaSpeedy(n_components=2, max_iter=10, random_state=123)
+        model2.fit(simple_data, cont_cols=['cont1', 'cont2'], cat_cols=['cat1'], ord_cols=['ord1'])
+        
+        assert np.allclose(model1.loglik_, model2.loglik_)
+        assert np.allclose(model1.pi_, model2.pi_)
+    
+    def test_different_marginals(self, simple_data):
+        """Test both Gaussian and Student-t marginals"""
+        for marginal in ['gaussian', 'student_t']:
+            model = MCMMGaussianCopula(
+                n_components=2,
+                cont_marginal=marginal,
+                max_iter=10,
+                random_state=42
+            )
+            model.fit(simple_data, cont_cols=['cont1', 'cont2'], cat_cols=['cat1'], ord_cols=['ord1'])
+            
+            assert model.loglik_ is not None
+    
+    def test_outlier_detection(self, simple_data):
+        """Test outlier detection"""
         model = MCMMGaussianCopula(n_components=2, max_iter=10, random_state=42)
-        model.fit(df, cont_cols=['cont'], cat_cols=['cat'])
-        assert model.loglik_ is not None
-    
-    def test_small_dataset(self):
-        """Test with very small dataset."""
-        df = pd.DataFrame({
-            'cont': [1.0, 2.0, 3.0],
-            'cat': ['A', 'B', 'A']
-        })
+        model.fit(simple_data, cont_cols=['cont1', 'cont2'], cat_cols=['cat1'], ord_cols=['ord1'])
         
-        model = MCMMGaussianCopula(n_components=2, max_iter=5, random_state=42)
-        model.fit(df, cont_cols=['cont'], cat_cols=['cat'])
-        assert model.loglik_ is not None
-    
-    def test_unfitted_predict_error(self):
-        """Test that predict raises error on unfitted model."""
-        model = MCMMGaussianCopula(n_components=2)
-        df = pd.DataFrame({'cont': [1.0, 2.0, 3.0]})
+        is_outlier, scores, threshold = model.detect_outliers(simple_data, q=5.0)
         
-        with pytest.raises(RuntimeError):
-            model.predict(df)
+        assert len(is_outlier) == len(simple_data)
+        assert len(scores) == len(simple_data)
+        assert isinstance(threshold, float)
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
-
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

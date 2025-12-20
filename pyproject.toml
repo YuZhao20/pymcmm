@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pymcmm"
+version = "0.2.0"
+description = "混合コピュラ混合モデル（MCMM）のPython実装"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Yu Zhao", email = "yu.zhao@rs.tus.ac.jp"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+    "joblib",
+]
+
+[project.optional-dependencies]
+bench = ["kmodes", "matplotlib", "seaborn"]
+cython = ["cython>=0.29.0"]
+
+[project.urls]
+Homepage = "https://github.com/YuZhao20/pymcmm"
+Repository = "https://github.com/YuZhao20/pymcmm"
+
+[tool.setuptools]
+packages = ["mcmm", "experiments"]
+
+[tool.setuptools.package-data]
+mcmm = ["*.pyx"]
+

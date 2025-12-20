@@ -20,6 +20,13 @@ from typing import List, Optional, Dict, Tuple
 from pandas.api.types import CategoricalDtype
 from joblib import Parallel, delayed
 
+# Try to import Cython acceleration, fallback to pure Python
+try:
+    from . import _fast_core
+    _CYTHON_AVAILABLE = True
+except ImportError:
+    _CYTHON_AVAILABLE = False
+
 # ---------- Utility Functions ----------
 
 def _safe_log(x, eps=1e-12):
@@ -87,6 +94,16 @@ def _studentt_cdf_scalar(x, mu, sig, nu):
 # ---------- Copula Densities ----------
 
 def _log_gaussian_copula_density_full(u, R):
+    """Computes log Gaussian copula density, using Cython if available."""
+    if _CYTHON_AVAILABLE:
+        try:
+            return _fast_core.log_gaussian_copula_density_full(np.asarray(u, dtype=np.float64), 
+                                                               np.asarray(R, dtype=np.float64))
+        except (AttributeError, TypeError):
+            # Fallback to pure Python if Cython function fails
+            pass
+    
+    # Pure Python implementation
     m = len(u)
     if m == 0: return 0.0
     z = norm.ppf(np.clip(u, 1e-10, 1 - 1e-10))
@@ -104,7 +121,15 @@ def _log_gaussian_copula_density_full(u, R):
     return -0.5 * logdet - 0.5 * quad
 
 def _log_bivariate_gaussian_copula(u1, u2, rho):
-    """Computes log-density of the bivariate Gaussian copula robustly."""
+    """Computes log-density of the bivariate Gaussian copula robustly, using Cython if available."""
+    if _CYTHON_AVAILABLE:
+        try:
+            return _fast_core.log_bivariate_gaussian_copula(float(u1), float(u2), float(rho))
+        except (AttributeError, TypeError):
+            # Fallback to pure Python if Cython function fails
+            pass
+    
+    # Pure Python implementation
     u1, u2 = np.clip(u1, 1e-10, 1 - 1e-10), np.clip(u2, 1e-10, 1 - 1e-10)
     z1, z2 = norm.ppf(u1), norm.ppf(u2)
     # Clip rho to avoid singularity at |rho|=1
@@ -449,6 +474,16 @@ class MCMMGaussianCopula:
             self.fitted_nu_ = _optimize_t_nu(all_z_t, all_w_t) or self.fitted_nu_
 
     def _pairwise_weighted_corr(self, Z, W):
+        """Computes pairwise weighted correlation, using Cython if available."""
+        if _CYTHON_AVAILABLE:
+            try:
+                return _fast_core.pairwise_weighted_corr_fast(np.asarray(Z, dtype=np.float64),
+                                                               np.asarray(W, dtype=np.float64))
+            except (AttributeError, TypeError):
+                # Fallback to pure Python if Cython function fails
+                pass
+        
+        # Pure Python implementation
         _, d = Z.shape
         R = np.eye(d)
         for i in range(d):

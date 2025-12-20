@@ -1,11 +1,16 @@
-This file is for setting up a development or experiment environment.
-To install the package in editable mode along with experiment dependencies:
-pip install -r requirements.txt
-Install the local package in editable mode
+# Core dependencies
+numpy
+pandas
+scikit-learn
+scipy
+joblib
 
--e .
-Dependencies for running benchmarks and visualization
+# Optional: Cython for acceleration (provides up to 35x speedup)
+# Uncomment the line below to enable Cython acceleration
+# cython>=0.29.0
 
-kmodes
-matplotlib
-seaborn
+# Optional: Benchmark and visualization dependencies
+# Uncomment the lines below for experiments
+# kmodes
+# matplotlib
+# seaborn

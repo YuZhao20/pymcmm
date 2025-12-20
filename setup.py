@@ -1,11 +1,39 @@
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
+from setuptools.command.build_ext import build_ext
+import numpy as np
+import os
+
+# Try to import Cython
+try:
+    from Cython.Build import cythonize
+    CYTHON_AVAILABLE = True
+except ImportError:
+    CYTHON_AVAILABLE = False
+    cythonize = None
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
+# Define Cython extensions
+extensions = []
+if CYTHON_AVAILABLE:
+    extensions = [
+        Extension(
+            "mcmm._fast_core",
+            ["mcmm/_fast_core.pyx"],
+            include_dirs=[np.get_include()],
+            extra_compile_args=["-O3"],
+        )
+    ]
+    extensions = cythonize(extensions, compiler_directives={
+        'language_level': "3",
+        'boundscheck': False,
+        'wraparound': False,
+    })
+
 setup(
     name="pymcmm",
-    version="0.1.1",
+    version="0.2.0",
     author="Yu Zhao",
     author_email="yu.zhao@rs.tus.ac.jp",
     description="混合コピュラ混合モデル（MCMM）のPython実装",
@@ -29,6 +57,10 @@ setup(
         "joblib",
     ],
     extras_require={
-        "bench": ["kmodes", "matplotlib", "seaborn"]
+        "bench": ["kmodes", "matplotlib", "seaborn"],
+        "cython": ["cython>=0.29.0"],
     },
+    ext_modules=extensions,
+    include_dirs=[np.get_include()],
+    zip_safe=False,
 )

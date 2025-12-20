@@ -242,18 +242,6 @@ print(f"Best K: {best['k']} (BIC: {best['bic']:.2f})")
 - Support for mixed continuous, categorical, and ordinal data
 - Missing value handling
 
-## Citation
-
-If you use pymcmm in your research, please cite:
-
-```bibtex
-@software{pymcmm,
-  title = {pymcmm: Mixed-Copula Mixture Model for Python},
-  author = {pymcmm developers},
-  year = {2024},
-  url = {https://github.com/your-username/pymcmm}
-}
-```
 
 ## License
 

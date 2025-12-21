@@ -6,9 +6,9 @@
 # cython: nonecheck=False
 
 """
-pymcmm Cython高速化コア実装
+pymcmm Cython高速化コア実装 v0.3.0
 
-元のmodel.pyの計算ボトルネックをC言語レベルで実装。
+E-step, M-step全体をバッチ処理で高速化。
 scipy.statsを使わず、数学関数を直接実装することで大幅な高速化を実現。
 
 コンパイル:
@@ -17,7 +17,8 @@ scipy.statsを使わず、数学関数を直接実装することで大幅な高
 
 import numpy as np
 cimport numpy as np
-from libc.math cimport log, sqrt, exp, fabs, M_PI, lgamma, pow, erf, isnan
+from libc.math cimport log, sqrt, exp, fabs, M_PI, lgamma, pow, erf, isnan, INFINITY
+from libc.stdlib cimport malloc, free
 from cython.parallel import prange
 cimport cython
 
@@ -525,6 +526,665 @@ def compute_cont_u_and_logmarg(np.ndarray[DTYPE_t, ndim=2] X_cont not None,
 
 
 # ============================================================
+# カテゴリ変数のU値計算（バッチ処理）- 新規追加
+# ============================================================
+
+def compute_cat_u_and_logmarg(np.ndarray[INT32_t, ndim=2] X_cat_idx not None,
+                               list cat_probs_list,
+                               int K,
+                               str dt_mode='mid'):
+    """
+    カテゴリ変数のU値と周辺対数密度をバッチ計算
+    
+    Parameters
+    ----------
+    X_cat_idx : ndarray (n, n_cat), int32
+        カテゴリ変数のインデックス（-1 = 欠損）
+    cat_probs_list : list of ndarray
+        各カテゴリ変数の確率 [(K, L_c), ...]
+    K : int
+        クラスタ数
+    dt_mode : str
+        'mid' のみ対応
+    
+    Returns
+    -------
+    U : ndarray (n, K, n_cat)
+        U値（NaNは-1.0でマーク）
+    log_marg : ndarray (n, K)
+        周辺対数密度の合計
+    """
+    cdef int n = X_cat_idx.shape[0]
+    cdef int n_cat = X_cat_idx.shape[1]
+    cdef int i, c, k, idx, L
+    cdef double prob_val, Fm, F
+    
+    cdef np.ndarray[DTYPE_t, ndim=3] U = np.empty((n, K, n_cat), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=2] log_marg = np.zeros((n, K), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=2] probs
+    
+    for c in range(n_cat):
+        probs = np.asarray(cat_probs_list[c], dtype=DTYPE)
+        L = probs.shape[1]
+        
+        for i in range(n):
+            idx = X_cat_idx[i, c]
+            
+            if idx < 0:  # 欠損値
+                for k in range(K):
+                    U[i, k, c] = -1.0
+                continue
+            
+            for k in range(K):
+                if idx >= L:
+                    prob_val = 1e-12
+                    Fm = 0.0
+                    F = 1.0
+                else:
+                    prob_val = probs[k, idx]
+                    if prob_val < 1e-12:
+                        prob_val = 1e-12
+                    
+                    # Fm = sum(probs[k, :idx])
+                    Fm = 0.0
+                    for j in range(idx):
+                        Fm = Fm + probs[k, j]
+                    F = Fm + prob_val
+                
+                log_marg[i, k] = log_marg[i, k] + safe_log(prob_val)
+                U[i, k, c] = 0.5 * (Fm + F)
+    
+    return U, log_marg
+
+
+# ============================================================
+# E-step完全バッチ処理 - 新規追加
+# ============================================================
+
+def compute_e_step_full(np.ndarray[DTYPE_t, ndim=2] X_cont not None,
+                         np.ndarray[INT32_t, ndim=2] X_cat_idx not None,
+                         np.ndarray[DTYPE_t, ndim=2] mu not None,
+                         np.ndarray[DTYPE_t, ndim=2] sig not None,
+                         list cat_probs_list,
+                         list R_list,
+                         np.ndarray[DTYPE_t, ndim=1] pi not None,
+                         double nu,
+                         str marginal_type='student_t',
+                         str weight_type='abs_rho',
+                         str copula_type='pairwise'):
+    """
+    E-step全体をバッチ処理で実行
+    
+    Parameters
+    ----------
+    X_cont : ndarray (n, p_cont)
+        連続変数データ
+    X_cat_idx : ndarray (n, n_cat)
+        カテゴリ変数インデックス（-1=欠損）
+    mu, sig : ndarray (K, p_cont)
+        周辺分布パラメータ
+    cat_probs_list : list
+        各カテゴリ変数の確率
+    R_list : list of ndarray
+        各クラスタの相関行列
+    pi : ndarray (K,)
+        混合比
+    nu : float
+        t分布の自由度
+    marginal_type : str
+        'gaussian' or 'student_t'
+    weight_type : str
+        'uniform' or 'abs_rho'
+    copula_type : str
+        'full' or 'pairwise'
+    
+    Returns
+    -------
+    log_resp : ndarray (n, K)
+        対数責任度
+    total_loglik : float
+        対数尤度合計
+    ll_per_sample : ndarray (n,)
+        サンプルごとの対数尤度
+    """
+    cdef int n = X_cont.shape[0]
+    cdef int p_cont = X_cont.shape[1]
+    cdef int n_cat = X_cat_idx.shape[1]
+    cdef int K = mu.shape[0]
+    cdef int d_all = p_cont + n_cat
+    cdef int i, j, k, c, idx
+    cdef double x_val, m, s, prob_val, Fm, F
+    cdef double log_c, msum, wsum, ui, uj, rho, w
+    cdef bint use_t = (marginal_type == 'student_t')
+    cdef bint use_abs_rho = (weight_type == 'abs_rho')
+    cdef bint use_full = (copula_type == 'full')
+    
+    # U値と周辺密度の配列
+    cdef np.ndarray[DTYPE_t, ndim=3] U = np.empty((n, K, d_all), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=2] log_pk = np.zeros((n, K), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=2] R
+    cdef np.ndarray[DTYPE_t, ndim=2] probs
+    
+    # 1. 連続変数のU値と周辺密度
+    for i in prange(n, nogil=True):
+        for k in range(K):
+            for j in range(p_cont):
+                x_val = X_cont[i, j]
+                
+                if isnan(x_val):
+                    U[i, k, j] = -1.0
+                    continue
+                
+                m = mu[k, j]
+                s = sig[k, j]
+                if s < 1e-9:
+                    s = 1e-9
+                
+                if use_t:
+                    U[i, k, j] = studentt_cdf_scaled(x_val, m, s, nu)
+                    log_pk[i, k] = log_pk[i, k] + studentt_logpdf(x_val, m, s, nu)
+                else:
+                    U[i, k, j] = gaussian_cdf(x_val, m, s)
+                    log_pk[i, k] = log_pk[i, k] + gaussian_logpdf(x_val, m, s)
+    
+    # 2. カテゴリ変数のU値と周辺密度（GIL必要）
+    for c in range(n_cat):
+        probs = np.asarray(cat_probs_list[c], dtype=DTYPE)
+        L = probs.shape[1]
+        
+        for i in range(n):
+            idx = X_cat_idx[i, c]
+            
+            if idx < 0:
+                for k in range(K):
+                    U[i, k, p_cont + c] = -1.0
+                continue
+            
+            for k in range(K):
+                if idx >= L:
+                    prob_val = 1e-12
+                    Fm = 0.0
+                    F = 1.0
+                else:
+                    prob_val = probs[k, idx]
+                    if prob_val < 1e-12:
+                        prob_val = 1e-12
+                    
+                    Fm = 0.0
+                    for jj in range(idx):
+                        Fm = Fm + probs[k, jj]
+                    F = Fm + prob_val
+                
+                log_pk[i, k] = log_pk[i, k] + safe_log(prob_val)
+                U[i, k, p_cont + c] = 0.5 * (Fm + F)
+    
+    # 3. コピュラ対数尤度
+    for k in range(K):
+        R = np.asarray(R_list[k], dtype=DTYPE)
+        
+        for i in range(n):
+            msum = 0.0
+            wsum = 0.0
+            
+            for ii in range(d_all):
+                ui = U[i, k, ii]
+                if ui < 0:
+                    continue
+                
+                for jj in range(ii + 1, d_all):
+                    uj = U[i, k, jj]
+                    if uj < 0:
+                        continue
+                    
+                    rho = R[ii, jj]
+                    
+                    if use_abs_rho:
+                        w = fabs(rho)
+                    else:
+                        w = 1.0
+                    
+                    log_c = log_bivariate_gaussian_copula(ui, uj, rho)
+                    msum = msum + w * log_c
+                    wsum = wsum + w
+            
+            if wsum > 1e-9:
+                log_pk[i, k] = log_pk[i, k] + msum / wsum
+    
+    # 4. 混合比を追加
+    cdef np.ndarray[DTYPE_t, ndim=2] log_weighted_pk = np.empty((n, K), dtype=DTYPE)
+    for i in range(n):
+        for k in range(K):
+            log_weighted_pk[i, k] = log_pk[i, k] + safe_log(pi[k])
+    
+    # 5. logsumexp
+    cdef np.ndarray[DTYPE_t, ndim=1] ll_per_sample = np.empty(n, dtype=DTYPE)
+    cdef double max_val, sum_exp
+    
+    for i in prange(n, nogil=True):
+        max_val = log_weighted_pk[i, 0]
+        for k in range(1, K):
+            if log_weighted_pk[i, k] > max_val:
+                max_val = log_weighted_pk[i, k]
+        
+        sum_exp = 0.0
+        for k in range(K):
+            sum_exp = sum_exp + exp(log_weighted_pk[i, k] - max_val)
+        
+        ll_per_sample[i] = max_val + log(sum_exp)
+    
+    # 6. 正規化（対数責任度）
+    cdef np.ndarray[DTYPE_t, ndim=2] log_resp = np.empty((n, K), dtype=DTYPE)
+    for i in range(n):
+        for k in range(K):
+            log_resp[i, k] = log_weighted_pk[i, k] - ll_per_sample[i]
+    
+    cdef double total_loglik = 0.0
+    for i in range(n):
+        total_loglik = total_loglik + ll_per_sample[i]
+    
+    return log_resp, total_loglik, ll_per_sample
+
+
+# ============================================================
+# E-step (Speedy mode) - 新規追加
+# ============================================================
+
+def compute_e_step_speedy(np.ndarray[DTYPE_t, ndim=2] X_cont not None,
+                           np.ndarray[INT32_t, ndim=2] X_cat_idx not None,
+                           np.ndarray[DTYPE_t, ndim=2] mu not None,
+                           np.ndarray[DTYPE_t, ndim=2] sig not None,
+                           list cat_probs_list,
+                           list R_list,
+                           list edges_list,
+                           np.ndarray[DTYPE_t, ndim=1] pi not None,
+                           double nu,
+                           str marginal_type='student_t',
+                           str weight_type='abs_rho'):
+    """
+    Speedy mode用E-step（MST/KNNエッジのみ使用）
+    """
+    cdef int n = X_cont.shape[0]
+    cdef int p_cont = X_cont.shape[1]
+    cdef int n_cat = X_cat_idx.shape[1]
+    cdef int K = mu.shape[0]
+    cdef int d_all = p_cont + n_cat
+    cdef int i, j, k, c, idx, e, ei, ej, jj, L
+    cdef double x_val, m, s, prob_val, Fm, F
+    cdef double log_c, msum, wsum, ui, uj, rho, w
+    cdef bint use_t = (marginal_type == 'student_t')
+    cdef bint use_abs_rho = (weight_type == 'abs_rho')
+    
+    cdef np.ndarray[DTYPE_t, ndim=3] U = np.empty((n, K, d_all), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=2] log_pk = np.zeros((n, K), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=2] R
+    cdef np.ndarray[DTYPE_t, ndim=2] probs
+    cdef list edges
+    cdef int n_edges
+    
+    # 1. 連続変数
+    for i in prange(n, nogil=True):
+        for k in range(K):
+            for j in range(p_cont):
+                x_val = X_cont[i, j]
+                
+                if isnan(x_val):
+                    U[i, k, j] = -1.0
+                    continue
+                
+                m = mu[k, j]
+                s = sig[k, j]
+                if s < 1e-9:
+                    s = 1e-9
+                
+                if use_t:
+                    U[i, k, j] = studentt_cdf_scaled(x_val, m, s, nu)
+                    log_pk[i, k] = log_pk[i, k] + studentt_logpdf(x_val, m, s, nu)
+                else:
+                    U[i, k, j] = gaussian_cdf(x_val, m, s)
+                    log_pk[i, k] = log_pk[i, k] + gaussian_logpdf(x_val, m, s)
+    
+    # 2. カテゴリ変数
+    for c in range(n_cat):
+        probs = np.asarray(cat_probs_list[c], dtype=DTYPE)
+        L = probs.shape[1]
+        
+        for i in range(n):
+            idx = X_cat_idx[i, c]
+            
+            if idx < 0:
+                for k in range(K):
+                    U[i, k, p_cont + c] = -1.0
+                continue
+            
+            for k in range(K):
+                if idx >= L:
+                    prob_val = 1e-12
+                    Fm = 0.0
+                    F = 1.0
+                else:
+                    prob_val = probs[k, idx]
+                    if prob_val < 1e-12:
+                        prob_val = 1e-12
+                    
+                    Fm = 0.0
+                    for jj in range(idx):
+                        Fm = Fm + probs[k, jj]
+                    F = Fm + prob_val
+                
+                log_pk[i, k] = log_pk[i, k] + safe_log(prob_val)
+                U[i, k, p_cont + c] = 0.5 * (Fm + F)
+    
+    # 3. コピュラ対数尤度（エッジリストのみ）
+    for k in range(K):
+        R = np.asarray(R_list[k], dtype=DTYPE)
+        edges = edges_list[k]
+        n_edges = len(edges)
+        
+        if n_edges == 0:
+            continue
+        
+        for i in range(n):
+            msum = 0.0
+            wsum = 0.0
+            
+            for e in range(n_edges):
+                ei, ej = edges[e]
+                ui = U[i, k, ei]
+                uj = U[i, k, ej]
+                
+                if ui < 0 or uj < 0:
+                    continue
+                
+                rho = R[ei, ej]
+                
+                if use_abs_rho:
+                    w = fabs(rho)
+                else:
+                    w = 1.0
+                
+                log_c = log_bivariate_gaussian_copula(ui, uj, rho)
+                msum = msum + w * log_c
+                wsum = wsum + w
+            
+            if wsum > 1e-9:
+                log_pk[i, k] = log_pk[i, k] + msum / wsum
+    
+    # 4. 混合比を追加
+    cdef np.ndarray[DTYPE_t, ndim=2] log_weighted_pk = np.empty((n, K), dtype=DTYPE)
+    for i in range(n):
+        for k in range(K):
+            log_weighted_pk[i, k] = log_pk[i, k] + safe_log(pi[k])
+    
+    # 5. logsumexp
+    cdef np.ndarray[DTYPE_t, ndim=1] ll_per_sample = np.empty(n, dtype=DTYPE)
+    cdef double max_val, sum_exp
+    
+    for i in prange(n, nogil=True):
+        max_val = log_weighted_pk[i, 0]
+        for k in range(1, K):
+            if log_weighted_pk[i, k] > max_val:
+                max_val = log_weighted_pk[i, k]
+        
+        sum_exp = 0.0
+        for k in range(K):
+            sum_exp = sum_exp + exp(log_weighted_pk[i, k] - max_val)
+        
+        ll_per_sample[i] = max_val + log(sum_exp)
+    
+    # 6. 正規化
+    cdef np.ndarray[DTYPE_t, ndim=2] log_resp = np.empty((n, K), dtype=DTYPE)
+    for i in range(n):
+        for k in range(K):
+            log_resp[i, k] = log_weighted_pk[i, k] - ll_per_sample[i]
+    
+    cdef double total_loglik = 0.0
+    for i in range(n):
+        total_loglik = total_loglik + ll_per_sample[i]
+    
+    return log_resp, total_loglik, ll_per_sample
+
+
+# ============================================================
+# M-step: 周辺分布パラメータ更新 - 新規追加
+# ============================================================
+
+def compute_m_step_marginals_cont(np.ndarray[DTYPE_t, ndim=2] X_cont not None,
+                                   np.ndarray[DTYPE_t, ndim=2] resp not None,
+                                   np.ndarray[DTYPE_t, ndim=2] mu_old not None,
+                                   np.ndarray[DTYPE_t, ndim=2] sig_old not None,
+                                   double nu,
+                                   str marginal_type='student_t'):
+    """
+    M-step: 連続変数の周辺分布パラメータ更新
+    
+    Parameters
+    ----------
+    X_cont : ndarray (n, p_cont)
+    resp : ndarray (n, K)
+    mu_old, sig_old : ndarray (K, p_cont)
+    nu : float
+    marginal_type : str
+    
+    Returns
+    -------
+    mu_new, sig_new : ndarray (K, p_cont)
+    all_z, all_w : list
+        t分布のnu推定用（estimate_nu=Trueの場合）
+    """
+    cdef int n = X_cont.shape[0]
+    cdef int p = X_cont.shape[1]
+    cdef int K = resp.shape[1]
+    cdef int i, j, k
+    cdef double x_val, w_em, z, w_t, w_sum, mu, var
+    cdef bint use_t = (marginal_type == 'student_t')
+    
+    cdef np.ndarray[DTYPE_t, ndim=2] mu_new = np.zeros((K, p), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=2] sig_new = np.ones((K, p), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=1] w_arr = np.empty(n, dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=1] x_arr = np.empty(n, dtype=DTYPE)
+    
+    all_z = []
+    all_w = []
+    
+    for k in range(K):
+        for j in range(p):
+            # 有効なサンプルを収集
+            w_sum = 0.0
+            mu = 0.0
+            cnt = 0
+            
+            for i in range(n):
+                x_val = X_cont[i, j]
+                if isnan(x_val):
+                    continue
+                
+                w_em = resp[i, k]
+                
+                if use_t:
+                    z = (x_val - mu_old[k, j]) / max(sig_old[k, j], 1e-9)
+                    w_t = (nu + 1.0) / (nu + z * z)
+                    w_em = w_em * w_t
+                
+                w_arr[cnt] = w_em
+                x_arr[cnt] = x_val
+                w_sum = w_sum + w_em
+                mu = mu + w_em * x_val
+                cnt += 1
+            
+            if w_sum < 1e-9 or cnt == 0:
+                mu_new[k, j] = mu_old[k, j]
+                sig_new[k, j] = sig_old[k, j]
+                continue
+            
+            mu = mu / w_sum
+            
+            # 分散計算
+            var = 0.0
+            for i in range(cnt):
+                var = var + w_arr[i] * (x_arr[i] - mu) * (x_arr[i] - mu)
+            var = var / w_sum
+            
+            mu_new[k, j] = mu
+            sig_new[k, j] = sqrt(max(var, 1e-10))
+            
+            # nu推定用のzとwを保存
+            if use_t:
+                z_list = []
+                w_list = []
+                for i in range(cnt):
+                    z = (x_arr[i] - mu) / max(sig_new[k, j], 1e-9)
+                    z_list.append(z)
+                    w_list.append(w_arr[i])
+                if z_list:
+                    all_z.append(np.array(z_list, dtype=DTYPE))
+                    all_w.append(np.array(w_list, dtype=DTYPE))
+    
+    return mu_new, sig_new, all_z, all_w
+
+
+def compute_m_step_marginals_cat(np.ndarray[INT32_t, ndim=2] X_cat_idx not None,
+                                  np.ndarray[DTYPE_t, ndim=2] resp not None,
+                                  list n_levels_list):
+    """
+    M-step: カテゴリ変数の確率更新
+    
+    Parameters
+    ----------
+    X_cat_idx : ndarray (n, n_cat)
+    resp : ndarray (n, K)
+    n_levels_list : list of int
+        各カテゴリ変数のレベル数
+    
+    Returns
+    -------
+    probs_list : list of ndarray (K, L_c)
+    """
+    cdef int n = X_cat_idx.shape[0]
+    cdef int n_cat = X_cat_idx.shape[1]
+    cdef int K = resp.shape[1]
+    cdef int i, c, k, idx, L
+    cdef double w
+    
+    probs_list = []
+    
+    for c in range(n_cat):
+        L = n_levels_list[c]
+        probs = np.zeros((K, L), dtype=DTYPE)
+        
+        for i in range(n):
+            idx = X_cat_idx[i, c]
+            if idx < 0 or idx >= L:
+                continue
+            
+            for k in range(K):
+                w = resp[i, k]
+                probs[k, idx] = probs[k, idx] + w
+        
+        # 正規化
+        for k in range(K):
+            row_sum = 0.0
+            for l in range(L):
+                probs[k, l] = probs[k, l] + 1e-9
+                row_sum = row_sum + probs[k, l]
+            for l in range(L):
+                probs[k, l] = probs[k, l] / row_sum
+        
+        probs_list.append(probs)
+    
+    return probs_list
+
+
+# ============================================================
+# M-step: コピュラパラメータ（相関行列）更新 - 新規追加
+# ============================================================
+
+def compute_u_matrix(np.ndarray[DTYPE_t, ndim=2] X_cont not None,
+                      np.ndarray[INT32_t, ndim=2] X_cat_idx not None,
+                      np.ndarray[DTYPE_t, ndim=2] mu not None,
+                      np.ndarray[DTYPE_t, ndim=2] sig not None,
+                      list cat_probs_list,
+                      int k,
+                      double nu,
+                      str marginal_type='student_t'):
+    """
+    単一クラスタkのU行列を計算
+    
+    Parameters
+    ----------
+    X_cont : ndarray (n, p_cont)
+    X_cat_idx : ndarray (n, n_cat)
+    mu, sig : ndarray (K, p_cont)
+    cat_probs_list : list
+    k : int
+        クラスタインデックス
+    nu : float
+    marginal_type : str
+    
+    Returns
+    -------
+    U : ndarray (n, d_all)
+        U値（NaNは np.nan）
+    """
+    cdef int n = X_cont.shape[0]
+    cdef int p_cont = X_cont.shape[1]
+    cdef int n_cat = X_cat_idx.shape[1]
+    cdef int d_all = p_cont + n_cat
+    cdef int i, j, c, idx, jj, L
+    cdef double x_val, m, s, prob_val, Fm, F
+    cdef bint use_t = (marginal_type == 'student_t')
+    
+    cdef np.ndarray[DTYPE_t, ndim=2] U = np.empty((n, d_all), dtype=DTYPE)
+    cdef np.ndarray[DTYPE_t, ndim=2] probs
+    
+    # 連続変数
+    for i in prange(n, nogil=True):
+        for j in range(p_cont):
+            x_val = X_cont[i, j]
+            
+            if isnan(x_val):
+                U[i, j] = -1.0  # NaN marker
+                continue
+            
+            m = mu[k, j]
+            s = sig[k, j]
+            if s < 1e-9:
+                s = 1e-9
+            
+            if use_t:
+                U[i, j] = studentt_cdf_scaled(x_val, m, s, nu)
+            else:
+                U[i, j] = gaussian_cdf(x_val, m, s)
+    
+    # カテゴリ変数
+    for c in range(n_cat):
+        probs = np.asarray(cat_probs_list[c], dtype=DTYPE)
+        L = probs.shape[1]
+        
+        for i in range(n):
+            idx = X_cat_idx[i, c]
+            
+            if idx < 0:
+                U[i, p_cont + c] = np.nan
+                continue
+            
+            if idx >= L:
+                Fm = 0.0
+                F = 1.0
+            else:
+                Fm = 0.0
+                for jj in range(idx):
+                    Fm = Fm + probs[k, jj]
+                F = Fm + probs[k, idx]
+            
+            U[i, p_cont + c] = 0.5 * (Fm + F)
+    
+    # -1.0 を NaN に変換
+    U[U < 0] = np.nan
+    
+    return U
+
+
+# ============================================================
 # 加重相関行列の計算
 # ============================================================
 
@@ -735,7 +1395,7 @@ def compute_pairwise_copula_loglik_edges(np.ndarray[DTYPE_t, ndim=1] u not None,
 
 
 # ============================================================
-# E-stepバッチ計算
+# E-stepバッチ計算（後方互換性）
 # ============================================================
 
 def compute_log_pk_batch_full(np.ndarray[DTYPE_t, ndim=3] U not None,
@@ -982,7 +1642,7 @@ def benchmark():
     from scipy.stats import norm as scipy_norm, t as scipy_t
     
     print("=" * 60)
-    print("pymcmm Cython高速化ベンチマーク")
+    print("pymcmm Cython高速化ベンチマーク v0.3.0")
     print("=" * 60)
     
     np.random.seed(42)
@@ -1059,6 +1719,28 @@ def benchmark():
     t0 = time.time()
     for _ in range(10):
         R = compute_weighted_corr(Z, W)
+    time_cython = (time.time() - t0) / 10
+    print(f"   Cython: {time_cython*1000:.2f} ms")
+    
+    # 5. E-step バッチ処理
+    print("\n5. E-step バッチ処理 (n=1000, p=10, K=3)")
+    n_test = 1000
+    p_test = 10
+    K_test = 3
+    X_cont = np.random.randn(n_test, p_test).astype(np.float64)
+    X_cat_idx = np.random.randint(-1, 3, size=(n_test, 2)).astype(np.int32)
+    mu = np.random.randn(K_test, p_test).astype(np.float64)
+    sig = np.abs(np.random.randn(K_test, p_test)).astype(np.float64) + 0.1
+    cat_probs = [np.random.dirichlet(np.ones(3), size=K_test) for _ in range(2)]
+    R_list = [np.eye(p_test + 2, dtype=np.float64) for _ in range(K_test)]
+    pi = np.ones(K_test, dtype=np.float64) / K_test
+    
+    t0 = time.time()
+    for _ in range(10):
+        log_resp, ll, ll_samples = compute_e_step_full(
+            X_cont, X_cat_idx, mu, sig, cat_probs, R_list, pi, 5.0,
+            'student_t', 'abs_rho', 'pairwise'
+        )
     time_cython = (time.time() - t0) / 10
     print(f"   Cython: {time_cython*1000:.2f} ms")
     

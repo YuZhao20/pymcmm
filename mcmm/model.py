@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Mixed-Copula Mixture Model (MCMM) with Gaussian Copula
-Cython高速化版
+Cython高速化版 v0.3.0
 
-元のpymcmmの機能を完全に維持しながら、計算ボトルネックをCythonで高速化。
+E-step, M-stepを完全にバッチ処理化し、大幅な高速化を実現。
 Cythonモジュールが利用できない場合は純Pythonにフォールバック。
 """
 
@@ -27,6 +27,12 @@ try:
         studentt_cdf_array, studentt_logpdf_array,
         gaussian_cdf_array, norm_ppf_array,
         compute_cont_u_and_logmarg,
+        compute_cat_u_and_logmarg,
+        compute_e_step_full,
+        compute_e_step_speedy,
+        compute_m_step_marginals_cont,
+        compute_m_step_marginals_cat,
+        compute_u_matrix,
         compute_weighted_corr,
         compute_pairwise_copula_loglik,
         compute_pairwise_copula_loglik_edges,
@@ -291,7 +297,7 @@ def _knn_graph_edges(Rabs: np.ndarray, k_per_node: int = 3):
 class MCMMGaussianCopula:
     """
     Mixed-Copula Mixture Model (MCMM) with Gaussian Copula.
-    Cython高速化版（Cythonが利用可能な場合）
+    Cython高速化版 v0.3.0（E-step/M-stepバッチ処理）
     """
     
     def __init__(self, n_components: int = 3, max_iter: int = 100, tol: float = 1e-4,
@@ -326,7 +332,7 @@ class MCMMGaussianCopula:
         # Cython使用状態を記録
         self._use_cython = USE_CYTHON
         if self.verbose and USE_CYTHON:
-            print("pymcmm: Cython acceleration enabled")
+            print("pymcmm: Cython acceleration enabled (v0.3.0 batch mode)")
 
     def _reset_fitted_attributes(self):
         self.cont_cols_, self.cat_cols_, self.ord_cols_ = None, None, None
@@ -334,6 +340,10 @@ class MCMMGaussianCopula:
         self.mu_, self.sig_, self.R_, self.pi_ = None, None, None, None
         self.cat_probs_, self.ord_probs_, self.ord_thetas_ = {}, {}, {}
         self.bic_, self.cbic_, self.loglik_, self.history_, self.fitted_nu_ = None, None, None, [], self.t_nu
+        # データのキャッシュ（高速化用）
+        self._X_cont_cache = None
+        self._X_cat_idx_cache = None
+        self._cat_probs_list_cache = None
 
     def _infer_columns(self, df, cont_cols, cat_cols, ord_cols):
         if cont_cols is None:
@@ -404,8 +414,53 @@ class MCMMGaussianCopula:
         resp[np.arange(len(df)), labels] = 1.0
         return resp * 0.9 + 0.1 / self.K
 
+    def _prepare_data_arrays(self, df: pd.DataFrame):
+        """データをNumPy配列に変換（Cython用）"""
+        n = len(df)
+        
+        # 連続変数
+        if self.cont_cols_:
+            X_cont = df[self.cont_cols_].to_numpy(dtype=np.float64)
+        else:
+            X_cont = np.empty((n, 0), dtype=np.float64)
+        
+        # カテゴリ変数をインデックスに変換
+        all_cat_cols = self.cat_cols_ + self.ord_cols_
+        n_cat = len(all_cat_cols)
+        
+        if n_cat > 0:
+            X_cat_idx = np.full((n, n_cat), -1, dtype=np.int32)
+            
+            for c_idx, c in enumerate(all_cat_cols):
+                levels = self.cat_levels_.get(c) or self.ord_levels_.get(c)
+                level_to_idx = {lv: i for i, lv in enumerate(levels)}
+                
+                x_col = df[c].to_numpy()
+                for i in range(n):
+                    val = x_col[i]
+                    if pd.isna(val):
+                        continue
+                    # カテゴリの場合は文字列に変換
+                    if c in self.cat_levels_:
+                        val = str(val)
+                    idx = level_to_idx.get(val, -1)
+                    X_cat_idx[i, c_idx] = idx
+        else:
+            X_cat_idx = np.empty((n, 0), dtype=np.int32)
+        
+        return X_cont, X_cat_idx
+
+    def _get_cat_probs_list(self):
+        """カテゴリ確率のリストを取得"""
+        probs_list = []
+        for c in self.cat_cols_:
+            probs_list.append(self.cat_probs_[c].astype(np.float64))
+        for c in self.ord_cols_:
+            probs_list.append(self.ord_probs_[c].astype(np.float64))
+        return probs_list
+
     def _build_u_vector(self, row_tuple, k):
-        """単一行のU値と周辺対数密度を計算"""
+        """単一行のU値と周辺対数密度を計算（フォールバック用）"""
         u_list, log_marg = [], 0.0
         
         for j, col in enumerate(self.cont_cols_):
@@ -443,7 +498,7 @@ class MCMMGaussianCopula:
         return np.array(u_list, float), log_marg
         
     def _log_pk_row(self, row_tuple):
-        """単一行の log P(x|k) を計算"""
+        """単一行の log P(x|k) を計算（フォールバック用）"""
         log_pk = np.zeros(self.K)
         all_cols_map = {c: i for i, c in enumerate(self.cont_cols_ + self.cat_cols_ + self.ord_cols_)}
         obs_idx = [all_cols_map[c] for c in row_tuple._fields if not pd.isna(getattr(row_tuple, c))]
@@ -483,7 +538,37 @@ class MCMMGaussianCopula:
         return log_pk
 
     def _get_log_probs_and_loglik(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
-        """E-stepのコア計算"""
+        """E-stepのコア計算（高速バッチ版）"""
+        if USE_CYTHON:
+            return self._get_log_probs_and_loglik_cython(df)
+        else:
+            return self._get_log_probs_and_loglik_python(df)
+
+    def _get_log_probs_and_loglik_cython(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
+        """Cython高速バッチ版E-step"""
+        # データ準備
+        X_cont, X_cat_idx = self._prepare_data_arrays(df)
+        cat_probs_list = self._get_cat_probs_list()
+        R_list = [self.R_[k].astype(np.float64) for k in range(self.K)]
+        
+        # E-step実行
+        log_resp, total_loglik, ll_per_sample = compute_e_step_full(
+            X_cont, X_cat_idx,
+            self.mu_.astype(np.float64),
+            self.sig_.astype(np.float64),
+            cat_probs_list,
+            R_list,
+            self.pi_.astype(np.float64),
+            self.fitted_nu_,
+            self.cont_marginal,
+            self.pairwise_weight,
+            self.copula_likelihood
+        )
+        
+        return log_resp, total_loglik, ll_per_sample
+
+    def _get_log_probs_and_loglik_python(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
+        """Pure Python版E-step（フォールバック）"""
         df = df.copy()
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
         
@@ -491,11 +576,7 @@ class MCMMGaussianCopula:
         log_pk = np.array(log_pk_list)
         
         log_weighted_pk = log_pk + _safe_log(self.pi_)
-        
-        if USE_CYTHON:
-            ll_per_sample = fast_logsumexp(log_weighted_pk.astype(np.float64))
-        else:
-            ll_per_sample = logsumexp(log_weighted_pk, axis=1)
+        ll_per_sample = logsumexp(log_weighted_pk, axis=1)
         
         log_resp = log_weighted_pk - ll_per_sample[:, None]
         total_loglik = np.sum(ll_per_sample)
@@ -508,6 +589,64 @@ class MCMMGaussianCopula:
 
     def _M_step_marginals(self, df, resp):
         """M-step for marginal distribution parameters."""
+        if USE_CYTHON and self.cont_cols_:
+            self._M_step_marginals_cython(df, resp)
+        else:
+            self._M_step_marginals_python(df, resp)
+
+    def _M_step_marginals_cython(self, df, resp):
+        """Cython高速版M-step（周辺分布）"""
+        n = len(df)
+        
+        # 連続変数
+        if self.cont_cols_:
+            X_cont = df[self.cont_cols_].to_numpy(dtype=np.float64)
+            
+            mu_new, sig_new, all_z, all_w = compute_m_step_marginals_cont(
+                X_cont,
+                resp.astype(np.float64),
+                self.mu_.astype(np.float64),
+                self.sig_.astype(np.float64),
+                self.fitted_nu_,
+                self.cont_marginal
+            )
+            
+            self.mu_ = mu_new
+            self.sig_ = sig_new
+            
+            # nu推定
+            if self.cont_marginal == 'student_t' and self.estimate_nu and all_z:
+                self.fitted_nu_ = _optimize_t_nu(all_z, all_w) or self.fitted_nu_
+        
+        # カテゴリ変数
+        if self.cat_cols_ or self.ord_cols_:
+            X_cont_dummy, X_cat_idx = self._prepare_data_arrays(df)
+            n_levels_list = []
+            all_cat_cols = self.cat_cols_ + self.ord_cols_
+            
+            for c in all_cat_cols:
+                levels = self.cat_levels_.get(c) or self.ord_levels_.get(c)
+                n_levels_list.append(len(levels))
+            
+            probs_list = compute_m_step_marginals_cat(
+                X_cat_idx,
+                resp.astype(np.float64),
+                n_levels_list
+            )
+            
+            # 結果を格納
+            for c_idx, c in enumerate(self.cat_cols_):
+                self.cat_probs_[c] = probs_list[c_idx]
+            
+            for c_idx, c in enumerate(self.ord_cols_):
+                idx = len(self.cat_cols_) + c_idx
+                self.ord_probs_[c] = probs_list[idx]
+        
+        # 混合比
+        self.pi_ = resp.mean(axis=0)
+
+    def _M_step_marginals_python(self, df, resp):
+        """Pure Python版M-step（周辺分布）"""
         if self.cont_cols_:
             Xc = df[self.cont_cols_].to_numpy(float)
             all_z_t, all_w_t = [], []
@@ -593,7 +732,48 @@ class MCMMGaussianCopula:
         """M-step for copula parameters."""
         d_all = len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
         self.R_ = np.array([np.eye(d_all) for _ in range(self.K)])
+        
+        if USE_CYTHON:
+            self._M_step_copulas_cython(df, resp)
+        else:
+            self._M_step_copulas_python(df, resp)
+
+    def _M_step_copulas_cython(self, df, resp):
+        """Cython高速版M-step（コピュラ）"""
+        X_cont, X_cat_idx = self._prepare_data_arrays(df)
+        cat_probs_list = self._get_cat_probs_list()
+        d_all = X_cont.shape[1] + X_cat_idx.shape[1]
+        
+        for k in range(self.K):
+            # U行列を計算
+            U_k = compute_u_matrix(
+                X_cont, X_cat_idx,
+                self.mu_.astype(np.float64),
+                self.sig_.astype(np.float64),
+                cat_probs_list,
+                k,
+                self.fitted_nu_,
+                self.cont_marginal
+            )
+            
+            # Z変換
+            Z = norm_ppf_array(np.clip(U_k.flatten(), 1e-10, 1-1e-10).astype(np.float64)).reshape(U_k.shape)
+            
+            # 相関行列計算
+            R = compute_weighted_corr(Z.astype(np.float64), resp[:, k].astype(np.float64))
+            R = _shrink_corr(R, self.shrink_lambda) if self.shrink_lambda > 0 else _nearest_pd(R)
+            
+            diag = np.sqrt(np.diag(R))
+            if np.any(diag < 1e-9):
+                continue
+            R /= np.outer(diag, diag)
+            np.fill_diagonal(R, 1.0)
+            self.R_[k] = R
+
+    def _M_step_copulas_python(self, df, resp):
+        """Pure Python版M-step（コピュラ）"""
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
+        d_all = len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
         
         for k in range(self.K):
             U_k = np.full((len(df), d_all), np.nan)
@@ -700,7 +880,7 @@ class MCMMGaussianCopula:
 class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
     """
     Speed-oriented variant of MCMM using sparse composite likelihood.
-    Cython高速化版。
+    Cython高速化版 v0.3.0。
     """
     
     def __init__(self, *args,
@@ -722,6 +902,69 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
         d_all = len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
         self.R_ = np.array([np.eye(d_all) for _ in range(self.K)])
         self.speedy_edges_ = [[] for _ in range(self.K)]
+        
+        if USE_CYTHON:
+            self._M_step_copulas_speedy_cython(df, resp)
+        else:
+            self._M_step_copulas_speedy_python(df, resp)
+
+    def _M_step_copulas_speedy_cython(self, df, resp):
+        """Cython高速版Speedy M-step（コピュラ）"""
+        n = len(df)
+        X_cont, X_cat_idx = self._prepare_data_arrays(df)
+        cat_probs_list = self._get_cat_probs_list()
+        d_all = X_cont.shape[1] + X_cat_idx.shape[1]
+        
+        for k in range(self.K):
+            # サブサンプリング
+            m = min(self.corr_subsample, n)
+            w = resp[:, k]
+            p = w / max(w.sum(), 1e-12)
+            if np.any(np.isnan(p)) or p.sum() < 1e-9:
+                idx = self.random_state.integers(0, n, size=m)
+            else:
+                idx = self.random_state.choice(n, size=m, replace=True, p=p)
+            
+            X_cont_sub = X_cont[idx]
+            X_cat_idx_sub = X_cat_idx[idx]
+            
+            # U行列を計算
+            U_sub = compute_u_matrix(
+                X_cont_sub, X_cat_idx_sub,
+                self.mu_.astype(np.float64),
+                self.sig_.astype(np.float64),
+                cat_probs_list,
+                k,
+                self.fitted_nu_,
+                self.cont_marginal
+            )
+            
+            # Z変換
+            Z = norm_ppf_array(np.clip(U_sub.flatten(), 1e-10, 1-1e-10).astype(np.float64)).reshape(U_sub.shape)
+            
+            # 相関行列計算
+            R = compute_weighted_corr(Z.astype(np.float64), np.ones(len(idx), dtype=np.float64))
+            R = _shrink_corr(R, self.shrink_lambda) if self.shrink_lambda > 0 else _nearest_pd(R)
+            
+            diag = np.sqrt(np.diag(R))
+            if not np.all(diag > 1e-9):
+                continue
+            R /= np.outer(diag, diag)
+            np.fill_diagonal(R, 1.0)
+            self.R_[k] = R
+            
+            # グラフ構築
+            Rabs = np.abs(R)
+            np.fill_diagonal(Rabs, 0.0)
+            if self.speedy_graph == 'mst':
+                self.speedy_edges_[k] = _max_spanning_tree_from_corr(Rabs)
+            else:
+                self.speedy_edges_[k] = _knn_graph_edges(Rabs, k_per_node=self.speedy_k_per_node)
+
+    def _M_step_copulas_speedy_python(self, df, resp):
+        """Pure Python版Speedy M-step（コピュラ）"""
+        n = len(df)
+        d_all = len(self.cont_cols_) + len(self.cat_cols_) + len(self.ord_cols_)
         row_tuples = list(df.itertuples(index=False, name='DataRow'))
 
         for k in range(self.K):
@@ -761,6 +1004,58 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
             else:
                 self.speedy_edges_[k] = _knn_graph_edges(Rabs, k_per_node=self.speedy_k_per_node)
     
+    def _get_log_probs_and_loglik(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
+        """Speedy mode用のE-step計算"""
+        if USE_CYTHON and self.speedy_edges_ is not None:
+            return self._get_log_probs_and_loglik_speedy_cython(df)
+        else:
+            return self._get_log_probs_and_loglik_speedy_python(df)
+
+    def _get_log_probs_and_loglik_speedy_cython(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
+        """Cython高速版Speedy E-step"""
+        X_cont, X_cat_idx = self._prepare_data_arrays(df)
+        cat_probs_list = self._get_cat_probs_list()
+        R_list = [self.R_[k].astype(np.float64) for k in range(self.K)]
+        
+        log_resp, total_loglik, ll_per_sample = compute_e_step_speedy(
+            X_cont, X_cat_idx,
+            self.mu_.astype(np.float64),
+            self.sig_.astype(np.float64),
+            cat_probs_list,
+            R_list,
+            self.speedy_edges_,
+            self.pi_.astype(np.float64),
+            self.fitted_nu_,
+            self.cont_marginal,
+            self.pairwise_weight
+        )
+        
+        return log_resp, total_loglik, ll_per_sample
+
+    def _get_log_probs_and_loglik_speedy_python(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
+        """Pure Python版Speedy E-step"""
+        n = len(df)
+        df = df.copy()
+        B = max(1, self.e_step_batch)
+        row_tuples = list(df.itertuples(index=False, name='DataRow'))
+        
+        results = Parallel(n_jobs=self.n_jobs)(
+            delayed(self._process_batch)(row_tuples[s:min(n, s+B)]) for s in range(0, n, B)
+        )
+        
+        log_pk = np.vstack(results)
+        
+        log_weighted_pk = log_pk + _safe_log(self.pi_)
+        
+        if USE_CYTHON:
+            ll_per_sample = fast_logsumexp(log_weighted_pk.astype(np.float64))
+        else:
+            ll_per_sample = logsumexp(log_weighted_pk, axis=1)
+        
+        log_resp = log_weighted_pk - ll_per_sample[:, None]
+        total_loglik = np.sum(ll_per_sample)
+        return log_resp, total_loglik, ll_per_sample
+
     def _log_pk_row_speedy(self, row_tuple):
         """Speedy mode用の単一行計算"""
         log_pk = np.zeros(self.K)
@@ -803,27 +1098,3 @@ class MCMMGaussianCopulaSpeedy(MCMMGaussianCopula):
     
     def _process_batch(self, batch_tuples):
         return np.array([self._log_pk_row_speedy(rt) for rt in batch_tuples])
-
-    def _get_log_probs_and_loglik(self, df: pd.DataFrame) -> Tuple[np.ndarray, float, np.ndarray]:
-        """Speedy mode用のE-step計算"""
-        n = len(df)
-        df = df.copy()
-        B = max(1, self.e_step_batch)
-        row_tuples = list(df.itertuples(index=False, name='DataRow'))
-        
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._process_batch)(row_tuples[s:min(n, s+B)]) for s in range(0, n, B)
-        )
-        
-        log_pk = np.vstack(results)
-        
-        log_weighted_pk = log_pk + _safe_log(self.pi_)
-        
-        if USE_CYTHON:
-            ll_per_sample = fast_logsumexp(log_weighted_pk.astype(np.float64))
-        else:
-            ll_per_sample = logsumexp(log_weighted_pk, axis=1)
-        
-        log_resp = log_weighted_pk - ll_per_sample[:, None]
-        total_loglik = np.sum(ll_per_sample)
-        return log_resp, total_loglik, ll_per_sample

@@ -12,6 +12,15 @@ from scipy.stats import norm, t as student_t
 from mcmm import MCMMGaussianCopula, MCMMGaussianCopulaSpeedy
 
 
+def _check_cython_available():
+    """Check if Cython module is available"""
+    try:
+        from mcmm._fast_core import py_norm_cdf
+        return True
+    except ImportError:
+        return False
+
+
 # ============================================================
 # Fixtures
 # ============================================================
@@ -209,15 +218,6 @@ class TestCythonFunctions:
             
             max_error = np.max(np.abs(scipy_result - cython_result))
             assert max_error < 1e-4, f"Max error for nu={nu}: {max_error}"
-
-
-def _check_cython_available():
-    """Check if Cython module is available"""
-    try:
-        from mcmm._fast_core import py_norm_cdf
-        return True
-    except ImportError:
-        return False
 
 
 # ============================================================

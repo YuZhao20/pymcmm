@@ -82,7 +82,7 @@ if os.path.exists("README.md"):
 
 setup(
     name="pymcmm",
-    version="0.2.0",
+    version="0.3.0",
     description="Mixed-Copula Mixture Model for clustering mixed-type data",
     long_description=long_description,
     long_description_content_type="text/markdown",

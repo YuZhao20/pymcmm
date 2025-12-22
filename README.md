@@ -12,7 +12,7 @@
 - **Missing Values**: Native support for missing data
 - **Student-t Marginals**: Robust to outliers with automatic degree of freedom estimation
 - **Speedy Mode**: Efficient computation for large datasets using sparse MST/KNN graphs
-- **Cython Acceleration**: Optional 35x speedup with Cython (v0.2.0+)
+- **Cython Acceleration**: Optional 35x speedup with Cython
 
 ## Installation
 
@@ -25,8 +25,7 @@ pip install pymcmm
 ### With Cython Acceleration (Recommended)
 
 ```bash
-pip install pymcmm
-pip install cython
+pip install pymcmm cython
 cd /path/to/pymcmm
 python setup.py build_ext --inplace
 ```
@@ -35,7 +34,6 @@ Verify acceleration:
 ```python
 import mcmm
 mcmm.check_acceleration()
-# ✓ Cython acceleration is enabled (35x faster)
 ```
 
 ## Quick Start
@@ -44,18 +42,16 @@ mcmm.check_acceleration()
 import pandas as pd
 from mcmm import MCMMGaussianCopulaSpeedy
 
-# Prepare your data
 df = pd.DataFrame({
-    'income': [50000, 60000, 75000, ...],      # continuous
-    'age': [25, 35, 45, ...],                   # continuous
-    'gender': ['M', 'F', 'M', ...],             # categorical
-    'satisfaction': [1, 2, 3, 4, 5, ...],       # ordinal
+    'income': [50000, 60000, 75000, 80000],
+    'age': [25, 35, 45, 55],
+    'gender': ['M', 'F', 'M', 'F'],
+    'satisfaction': [1, 2, 3, 4],
 })
 
-# Create and fit model
 model = MCMMGaussianCopulaSpeedy(
-    n_components=3,           # number of clusters
-    cont_marginal='student_t', # robust to outliers
+    n_components=2,
+    cont_marginal='student_t',
     copula_likelihood='pairwise',
     verbose=1
 )
@@ -67,11 +63,9 @@ model.fit(
     ord_cols=['satisfaction']
 )
 
-# Predict clusters
 clusters = model.predict(df)
 probabilities = model.predict_proba(df)
 
-# Model evaluation
 print(f"BIC: {model.bic_:.2f}")
 print(f"Log-likelihood: {model.loglik_:.2f}")
 ```
@@ -87,8 +81,8 @@ from mcmm import MCMMGaussianCopula
 
 model = MCMMGaussianCopula(
     n_components=3,
-    cont_marginal='student_t',  # 'gaussian' or 'student_t'
-    copula_likelihood='pairwise',  # 'full' or 'pairwise'
+    cont_marginal='student_t',
+    copula_likelihood='pairwise',
     max_iter=100,
     verbose=1
 )
@@ -104,9 +98,9 @@ from mcmm import MCMMGaussianCopulaSpeedy
 model = MCMMGaussianCopulaSpeedy(
     n_components=3,
     cont_marginal='student_t',
-    speedy_graph='mst',        # 'mst' or 'knn'
-    corr_subsample=3000,       # subsample size for correlation
-    n_jobs=-1,                 # parallel processing
+    speedy_graph='mst',
+    corr_subsample=3000,
+    n_jobs=-1,
     verbose=1
 )
 ```
@@ -122,6 +116,7 @@ model = MCMMGaussianCopulaSpeedy(
 | `ord_marginal` | 'cumlogit' | Ordinal marginal: 'cumlogit' or 'freq' |
 | `copula_likelihood` | 'pairwise' | Copula type: 'full' or 'pairwise' |
 | `pairwise_weight` | 'abs_rho' | Pairwise weight: 'abs_rho' or 'uniform' |
+| `dt_mode` | 'mid' | Discretization mode: 'mid' or 'random' |
 | `shrink_lambda` | 0.05 | Correlation matrix shrinkage |
 | `max_iter` | 100 | Maximum EM iterations |
 | `tol` | 1e-4 | Convergence tolerance |
@@ -138,23 +133,6 @@ model = MCMMGaussianCopulaSpeedy(
 | `corr_subsample` | 3000 | Subsample size for correlation estimation |
 | `e_step_batch` | 4096 | Batch size for E-step |
 
-## Performance
-
-### Speed Comparison (n=500, p=13, K=3)
-
-| Version | Time | Speedup |
-|---------|------|---------|
-| Pure Python | 65.4s | 1x |
-| Cython | 1.9s | **35x** |
-
-### Scalability Guidelines
-
-| Dataset Size | Recommended Mode |
-|--------------|------------------|
-| n < 1,000 | MCMMGaussianCopula |
-| n < 10,000 | MCMMGaussianCopulaSpeedy |
-| n > 10,000 | MCMMGaussianCopulaSpeedy + n_jobs=-1 |
-
 ## Methods
 
 ### Fitting
@@ -166,13 +144,8 @@ model.fit(df, cont_cols=None, cat_cols=None, ord_cols=None)
 ### Prediction
 
 ```python
-# Hard cluster assignment
 clusters = model.predict(df)
-
-# Cluster probabilities
 proba = model.predict_proba(df)
-
-# Per-sample log-likelihood
 log_lik = model.score_samples(df)
 ```
 
@@ -199,16 +172,10 @@ is_outlier, scores, threshold = model.detect_outliers(df, q=1.0)
 
 ```python
 import pandas as pd
-import numpy as np
 from mcmm import MCMMGaussianCopulaSpeedy
 
-# Load customer data
 df = pd.read_csv('customers.csv')
 
-# Handle missing values (MCMM supports them natively)
-# No imputation needed!
-
-# Fit model with multiple K values
 results = []
 for k in range(2, 8):
     model = MCMMGaussianCopulaSpeedy(
@@ -222,26 +189,17 @@ for k in range(2, 8):
               ord_cols=['satisfaction'])
     results.append({'k': k, 'bic': model.bic_, 'loglik': model.loglik_})
 
-# Select best K by BIC
 best = min(results, key=lambda x: x['bic'])
 print(f"Best K: {best['k']} (BIC: {best['bic']:.2f})")
 ```
 
-## Changelog
+## Scalability Guidelines
 
-### v0.2.0 (2024-12)
-- **NEW**: Cython acceleration (35x speedup)
-- **NEW**: Automatic fallback to pure Python when Cython unavailable
-- **NEW**: `check_acceleration()` and `run_benchmark()` functions
-- Improved numerical stability in copula calculations
-- Fixed edge cases in Student-t CDF computation
-
-### v0.1.0 (2024-10)
-- Initial release
-- MCMMGaussianCopula and MCMMGaussianCopulaSpeedy
-- Support for mixed continuous, categorical, and ordinal data
-- Missing value handling
-
+| Dataset Size | Recommended Mode |
+|--------------|------------------|
+| n < 1,000 | MCMMGaussianCopula |
+| n < 10,000 | MCMMGaussianCopulaSpeedy |
+| n > 10,000 | MCMMGaussianCopulaSpeedy + n_jobs=-1 |
 
 ## License
 

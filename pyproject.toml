@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "numpy>=1.20"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pymcmm"
+version = "0.3.0"
+description = "Mixed-Copula Mixture Model for clustering mixed-type data"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "pymcmm developers"}
+]
+keywords = ["clustering", "mixture-model", "copula", "mixed-data", "machine-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.20",
+    "pandas>=1.3",
+    "scipy>=1.7",
+    "scikit-learn>=1.0",
+    "joblib>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "cython>=0.29",
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+]
+cython = [
+    "cython>=0.29",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/pymcmm"
+Documentation = "https://github.com/your-username/pymcmm#readme"
+Repository = "https://github.com/your-username/pymcmm"
+Changelog = "https://github.com/your-username/pymcmm/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+include = ["mcmm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["mcmm"]
+omit = ["mcmm/_fast_core.pyx"]

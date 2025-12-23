@@ -286,20 +286,6 @@ print(f"Best K: {best['k']} (BIC: {best['bic']:.2f})")
 | n < 10,000 | MCMMGaussianCopulaSpeedy | Recommended |
 | n > 10,000 | MCMMGaussianCopulaSpeedy + n_jobs=-1 | Recommended |
 
-## Citation
-
-If you use this package in your research, please cite:
-
-```bibtex
-@software{pymcmm,
-  author = {pymcmm developers},
-  title = {pymcmm: Mixed-Copula Mixture Model for Python},
-  url = {https://github.com/YuZhao20/pymcmm},
-  version = {0.3.0},
-  year = {2024}
-}
-```
-
 ## License
 
 MIT License

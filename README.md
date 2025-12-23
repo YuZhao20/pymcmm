@@ -22,7 +22,7 @@
 pip install git+https://github.com/YuZhao20/pymcmm.git
 ```
 
-### From PyPI (Coming Soon)
+### From PyPI
 
 ```bash
 pip install pymcmm

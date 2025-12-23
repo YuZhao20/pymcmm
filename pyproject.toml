@@ -44,10 +44,10 @@ cython = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-username/pymcmm"
-Documentation = "https://github.com/your-username/pymcmm#readme"
-Repository = "https://github.com/your-username/pymcmm"
-Changelog = "https://github.com/your-username/pymcmm/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/YuZhao20/pymcmm"
+Documentation = "https://github.com/YuZhao20/pymcmm#readme"
+Repository = "https://github.com/YuZhao20/pymcmm"
+Issues = "https://github.com/YuZhao20/pymcmm/issues"
 
 [tool.setuptools.packages.find]
 include = ["mcmm*"]

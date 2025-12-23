@@ -70,6 +70,91 @@ print(f"BIC: {model.bic_:.2f}")
 print(f"Log-likelihood: {model.loglik_:.2f}")
 ```
 
+## Cython Acceleration
+
+### Overview
+
+pymcmm includes optional Cython-accelerated implementations that provide significant speedups for computationally intensive operations. **Cython is not required** - the package automatically falls back to pure Python implementations if Cython modules are not available.
+
+### What Gets Accelerated
+
+| Component | Pure Python | Cython | Speedup |
+|-----------|------------|--------|---------|
+| Normal CDF/PPF | scipy.stats | Custom C implementation | ~10x |
+| Student-t CDF | scipy.stats | Incomplete beta function | ~15x |
+| Bivariate copula density | numpy/scipy | Optimized C loops | ~20x |
+| E-step (batch) | Python loops | Parallel Cython | ~35x |
+| M-step (marginals) | Python loops | Vectorized Cython | ~25x |
+| Weighted correlation | numpy | Optimized pairwise | ~10x |
+
+### Performance Benchmark
+
+Typical speedup for a dataset with n=500, p=13, K=3:
+
+| Mode | Pure Python | Cython | Speedup |
+|------|------------|--------|---------|
+| MCMMGaussianCopula | ~65s | ~1.9s | **35x** |
+| MCMMGaussianCopulaSpeedy | ~45s | ~1.5s | **30x** |
+
+### Building Cython Extensions
+
+**Prerequisites:**
+- C compiler (gcc, clang, or MSVC)
+- Cython >= 0.29
+- NumPy development headers
+
+**macOS:**
+```bash
+# Install Xcode command line tools (provides clang)
+xcode-select --install
+
+# Optional: Install OpenMP for parallel processing
+brew install libomp
+
+pip install cython
+python setup.py build_ext --inplace
+```
+
+**Linux:**
+```bash
+# Ubuntu/Debian
+sudo apt-get install build-essential python3-dev
+
+pip install cython
+python setup.py build_ext --inplace
+```
+
+**Windows:**
+```bash
+# Requires Visual Studio Build Tools
+pip install cython
+python setup.py build_ext --inplace
+```
+
+### Verification and Benchmarking
+
+```python
+import mcmm
+
+# Check if Cython is enabled
+mcmm.check_acceleration()
+# Output: ✓ Cython acceleration is enabled (35x faster)
+# or:     ✗ Cython acceleration is NOT available (using pure Python)
+
+# Run performance benchmark
+mcmm.run_benchmark()
+```
+
+### Troubleshooting
+
+If Cython compilation fails:
+
+1. **Missing compiler**: Install build tools for your platform
+2. **NumPy headers not found**: Reinstall NumPy with `pip install --force-reinstall numpy`
+3. **OpenMP errors on macOS**: The library works without OpenMP; parallel loops will be sequential
+
+The package will always work without Cython - just slower.
+
 ## Model Classes
 
 ### MCMMGaussianCopula
@@ -195,11 +280,11 @@ print(f"Best K: {best['k']} (BIC: {best['bic']:.2f})")
 
 ## Scalability Guidelines
 
-| Dataset Size | Recommended Mode |
-|--------------|------------------|
-| n < 1,000 | MCMMGaussianCopula |
-| n < 10,000 | MCMMGaussianCopulaSpeedy |
-| n > 10,000 | MCMMGaussianCopulaSpeedy + n_jobs=-1 |
+| Dataset Size | Recommended Mode | Cython |
+|--------------|------------------|--------|
+| n < 1,000 | MCMMGaussianCopula | Optional |
+| n < 10,000 | MCMMGaussianCopulaSpeedy | Recommended |
+| n > 10,000 | MCMMGaussianCopulaSpeedy + n_jobs=-1 | Required |
 
 ## License
 

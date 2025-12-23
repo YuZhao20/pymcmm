@@ -12,20 +12,27 @@
 - **Missing Values**: Native support for missing data
 - **Student-t Marginals**: Robust to outliers with automatic degree of freedom estimation
 - **Speedy Mode**: Efficient computation for large datasets using sparse MST/KNN graphs
-- **Cython Acceleration**: Optional 35x speedup with Cython
+- **Cython Acceleration**: Optional speedup (up to 35x) with Cython
 
 ## Installation
 
-### Basic Installation
+### From GitHub (Recommended)
+
+```bash
+pip install git+https://github.com/YuZhao20/pymcmm.git
+```
+
+### From PyPI (Coming Soon)
 
 ```bash
 pip install pymcmm
 ```
 
-### With Cython Acceleration (Recommended)
+### With Cython Acceleration
 
 ```bash
-pip install pymcmm cython
+pip install git+https://github.com/YuZhao20/pymcmm.git
+pip install cython
 cd /path/to/pymcmm
 python setup.py build_ext --inplace
 ```
@@ -80,12 +87,12 @@ pymcmm includes optional Cython-accelerated implementations that provide signifi
 
 | Component | Pure Python | Cython | Speedup |
 |-----------|------------|--------|---------|
-| Normal CDF/PPF | scipy.stats | Custom C implementation | ~10x |
-| Student-t CDF | scipy.stats | Incomplete beta function | ~15x |
-| Bivariate copula density | numpy/scipy | Optimized C loops | ~20x |
-| E-step (batch) | Python loops | Parallel Cython | ~35x |
-| M-step (marginals) | Python loops | Vectorized Cython | ~25x |
-| Weighted correlation | numpy | Optimized pairwise | ~10x |
+| Normal CDF/PPF | scipy.stats | Custom C implementation | up to 10x |
+| Student-t CDF | scipy.stats | Incomplete beta function | up to 15x |
+| Bivariate copula density | numpy/scipy | Optimized C loops | up to 20x |
+| E-step (batch) | Python loops | Parallel Cython | up to 35x |
+| M-step (marginals) | Python loops | Vectorized Cython | up to 25x |
+| Weighted correlation | numpy | Optimized pairwise | up to 10x |
 
 ### Performance Benchmark
 
@@ -93,8 +100,10 @@ Typical speedup for a dataset with n=500, p=13, K=3:
 
 | Mode | Pure Python | Cython | Speedup |
 |------|------------|--------|---------|
-| MCMMGaussianCopula | ~65s | ~1.9s | **35x** |
-| MCMMGaussianCopulaSpeedy | ~45s | ~1.5s | **30x** |
+| MCMMGaussianCopula | ~65s | ~1.9s | up to 35x |
+| MCMMGaussianCopulaSpeedy | ~45s | ~1.5s | up to 30x |
+
+*Note: Actual speedup varies depending on hardware and dataset characteristics.*
 
 ### Building Cython Extensions
 
@@ -105,28 +114,21 @@ Typical speedup for a dataset with n=500, p=13, K=3:
 
 **macOS:**
 ```bash
-# Install Xcode command line tools (provides clang)
 xcode-select --install
-
-# Optional: Install OpenMP for parallel processing
-brew install libomp
-
+brew install libomp  # Optional: for parallel processing
 pip install cython
 python setup.py build_ext --inplace
 ```
 
 **Linux:**
 ```bash
-# Ubuntu/Debian
 sudo apt-get install build-essential python3-dev
-
 pip install cython
 python setup.py build_ext --inplace
 ```
 
 **Windows:**
 ```bash
-# Requires Visual Studio Build Tools
 pip install cython
 python setup.py build_ext --inplace
 ```
@@ -138,8 +140,6 @@ import mcmm
 
 # Check if Cython is enabled
 mcmm.check_acceleration()
-# Output: ✓ Cython acceleration is enabled (35x faster)
-# or:     ✗ Cython acceleration is NOT available (using pure Python)
 
 # Run performance benchmark
 mcmm.run_benchmark()
@@ -159,7 +159,7 @@ The package will always work without Cython - just slower.
 
 ### MCMMGaussianCopula
 
-Full copula model with O(p²) pairwise dependencies.
+Full copula model with O(p^2) pairwise dependencies.
 
 ```python
 from mcmm import MCMMGaussianCopula
@@ -284,7 +284,21 @@ print(f"Best K: {best['k']} (BIC: {best['bic']:.2f})")
 |--------------|------------------|--------|
 | n < 1,000 | MCMMGaussianCopula | Optional |
 | n < 10,000 | MCMMGaussianCopulaSpeedy | Recommended |
-| n > 10,000 | MCMMGaussianCopulaSpeedy + n_jobs=-1 | Required |
+| n > 10,000 | MCMMGaussianCopulaSpeedy + n_jobs=-1 | Recommended |
+
+## Citation
+
+If you use this package in your research, please cite:
+
+```bibtex
+@software{pymcmm,
+  author = {pymcmm developers},
+  title = {pymcmm: Mixed-Copula Mixture Model for Python},
+  url = {https://github.com/YuZhao20/pymcmm},
+  version = {0.3.0},
+  year = {2024}
+}
+```
 
 ## License
 

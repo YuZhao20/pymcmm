@@ -52,7 +52,7 @@ df = pd.DataFrame({
 model = MCMMGaussianCopulaSpeedy(
     n_components=2,
     cont_marginal='student_t',
-    copula_likelihood='pairwise',
+    copula_likelihood='full',
     verbose=1
 )
 
@@ -82,7 +82,7 @@ from mcmm import MCMMGaussianCopula
 model = MCMMGaussianCopula(
     n_components=3,
     cont_marginal='student_t',
-    copula_likelihood='pairwise',
+    copula_likelihood='full',
     max_iter=100,
     verbose=1
 )
@@ -114,7 +114,7 @@ model = MCMMGaussianCopulaSpeedy(
 | `t_nu` | 5.0 | Initial degrees of freedom for Student-t |
 | `estimate_nu` | True | Estimate nu from data |
 | `ord_marginal` | 'cumlogit' | Ordinal marginal: 'cumlogit' or 'freq' |
-| `copula_likelihood` | 'pairwise' | Copula type: 'full' or 'pairwise' |
+| `copula_likelihood` | 'full' | Copula type: 'full' or 'pairwise' |
 | `pairwise_weight` | 'abs_rho' | Pairwise weight: 'abs_rho' or 'uniform' |
 | `dt_mode` | 'mid' | Discretization mode: 'mid' or 'random' |
 | `shrink_lambda` | 0.05 | Correlation matrix shrinkage |

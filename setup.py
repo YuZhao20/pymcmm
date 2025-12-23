@@ -69,7 +69,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="pymcmm developers",
-    url="https://github.com/your-username/pymcmm",
+    url="https://github.com/YuZhao20/pymcmm",
     license="MIT",
     packages=find_packages(),
     ext_modules=ext_modules,

@@ -2,7 +2,12 @@
 from .model import MCMMGaussianCopula, MCMMGaussianCopulaSpeedy
 
 __version__ = "0.3.0"
-__all__ = ["MCMMGaussianCopula", "MCMMGaussianCopulaSpeedy"]
+__all__ = [
+    "MCMMGaussianCopula",
+    "MCMMGaussianCopulaSpeedy",
+    "check_acceleration",
+    "run_benchmark",
+]
 
 _CYTHON_AVAILABLE = False
 
@@ -14,21 +19,6 @@ except ImportError:
 
 
 def check_acceleration():
-    """
-    Check if Cython acceleration is available.
-    
-    Returns
-    -------
-    bool
-        True if Cython acceleration is enabled, False otherwise.
-    
-    Examples
-    --------
-    >>> import mcmm
-    >>> mcmm.check_acceleration()
-    ✓ Cython acceleration is enabled (35x faster)
-    True
-    """
     if _CYTHON_AVAILABLE:
         print("✓ Cython acceleration is enabled (35x faster)")
         return True
@@ -39,11 +29,6 @@ def check_acceleration():
 
 
 def run_benchmark():
-    """
-    Run performance benchmark comparing scipy vs Cython implementations.
-    
-    Only available when Cython acceleration is enabled.
-    """
     if _benchmark is not None:
         _benchmark()
     else:
